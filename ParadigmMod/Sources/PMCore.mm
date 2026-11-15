@@ -22,6 +22,7 @@
 #include <sys/mman.h>
 #include <string.h>
 #include <math.h>
+#include <ctype.h>
 #include <libkern/OSCacheControl.h>
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,7 @@ bool PMAutoPlay = true;
 bool PMAllPerfect = false;
 bool PMLockHP = false;
 bool PMUnlockAll = false;
+bool PMPaidUnlock = false;
 bool PMBlockUpload = false;
 float PMSpeed = 1.0f;
 
@@ -46,6 +48,8 @@ static const uintptr_t kRVA_JudgeSystem_UpdateTime = 0x012EAE08;
 static const uintptr_t kRVA_JudgeSlot_SetResult      = 0x012F37F0;
 static const uintptr_t kRVA_GameControl_AddHP        = 0x01079DC8;
 static const uintptr_t kRVA_BackendAPI_Run           = 0x01331700;
+static const uintptr_t kRVA_Store_IsPurchasedStr     = 0x013644D0;
+static const uintptr_t kRVA_Store_IsPurchasedEnum    = 0x01364574;
 
 // JudgeSystem / JudgeSlot / List 字段偏移
 static const size_t kOff_JS_Slots = 0x10;
@@ -349,6 +353,55 @@ static void *pm_Run_hook(void *enumerator, void *method) {
 }
 
 // ---------------------------------------------------------------------------
+// Hook: GameNetwork.Store.IsPurchased -> 本地放行付费曲包
+// ---------------------------------------------------------------------------
+static void pm_il2cpp_string_ascii(void *s, char *out, size_t cap) {
+    if (!cap) return;
+    if (!s) { out[0] = 0; return; }
+    int len = *(int *)((char *)s + 0x10);              // Il2CppString.length
+    const uint16_t *chars = (const uint16_t *)((char *)s + 0x14);
+    if (len < 0) len = 0;
+    size_t n = 0;
+    for (int i = 0; i < len && n + 1 < cap; i++) {
+        uint16_t c = chars[i];
+        out[n++] = (c < 0x80) ? (char)c : '?';
+    }
+    out[n] = 0;
+}
+
+static bool pm_contains_ci(const char *hay, const char *needle) {
+    size_t n = strlen(needle);
+    if (!n) return true;
+    for (const char *p = hay; *p; p++) {
+        size_t i = 0;
+        while (i < n && p[i] && tolower((unsigned char)p[i]) == (unsigned char)needle[i]) i++;
+        if (i == n) return true;
+    }
+    return false;
+}
+
+static bool (*orig_IsPurchasedStr)(void *productId, void *method) = NULL;
+static bool (*orig_IsPurchasedEnum)(int product, void *method) = NULL;
+
+static bool pm_IsPurchasedStr_hook(void *productId, void *method) {
+    if (__atomic_load_n(&PMPaidUnlock, __ATOMIC_RELAXED)) {
+        char buf[192];
+        pm_il2cpp_string_ascii(productId, buf, sizeof(buf));
+        // 水晶包 / 皮肤不冒充已购买，避免商店入口异常
+        if (!pm_contains_ci(buf, "crystal") && !pm_contains_ci(buf, "skin")) return true;
+    }
+    return orig_IsPurchasedStr ? orig_IsPurchasedStr(productId, method) : false;
+}
+
+static bool pm_IsPurchasedEnum_hook(int product, void *method) {
+    if (__atomic_load_n(&PMPaidUnlock, __ATOMIC_RELAXED)) {
+        // ProductEnum 15..18 = ActiveCrystal20/110/450/1200
+        if (!(product >= 15 && product <= 18)) return true;
+    }
+    return orig_IsPurchasedEnum ? orig_IsPurchasedEnum(product, method) : false;
+}
+
+// ---------------------------------------------------------------------------
 // 周期任务：全解锁 / 变速
 // ---------------------------------------------------------------------------
 static float gOrigHiSpeed = 1.0f;
@@ -413,10 +466,14 @@ void PMInstallHooks(void) {
         (void *)((char *)base + kRVA_GameControl_AddHP), (void *)pm_AddHP_hook);
     orig_Run = (void *(*)(void *, void *))pm_install_hook(
         (void *)((char *)base + kRVA_BackendAPI_Run), (void *)pm_Run_hook);
+    orig_IsPurchasedStr = (bool (*)(void *, void *))pm_install_hook(
+        (void *)((char *)base + kRVA_Store_IsPurchasedStr), (void *)pm_IsPurchasedStr_hook);
+    orig_IsPurchasedEnum = (bool (*)(int, void *))pm_install_hook(
+        (void *)((char *)base + kRVA_Store_IsPurchasedEnum), (void *)pm_IsPurchasedEnum_hook);
 
     PMHookReady = (orig_UpdateTime != NULL);
-    PMLog(@"hooks: updateTime=%d setResult=%d addHP=%d run=%d il2cpp=%d",
+    PMLog(@"hooks: updateTime=%d setResult=%d addHP=%d run=%d isPurchasedStr=%d isPurchasedEnum=%d il2cpp=%d",
           orig_UpdateTime != NULL, orig_SetResult != NULL, orig_AddHP != NULL,
-          orig_Run != NULL, api);
+          orig_Run != NULL, orig_IsPurchasedStr != NULL, orig_IsPurchasedEnum != NULL, api);
     pm_apply_static_settings();
 }

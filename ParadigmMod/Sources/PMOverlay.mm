@@ -11,6 +11,7 @@ typedef NS_ENUM(NSInteger, PMRowTag) {
     PMRowAllPerfect,
     PMRowLockHP,
     PMRowUnlockAll,
+    PMRowPaidUnlock,
     PMRowBlockUpload,
 };
 
@@ -104,6 +105,7 @@ static NSTimer *gStatusTimer = nil;
 
     [self addSection:@"解锁"];
     [self addSwitch:@"全曲 / 全难度解锁" detail:@"写入 TrackUnlockStorage.UnlockAll" tag:PMRowUnlockAll on:PMUnlockAll];
+    [self addSwitch:@"解锁付费曲包（本地）" detail:@"仅本地把 IsPurchased 判为 true，服务端仍视为未购买" tag:PMRowPaidUnlock on:PMPaidUnlock];
 
     [self addSection:@"网络"];
     [self addSwitch:@"屏蔽成绩上传" detail:@"拦截 BackendAPI.ScoreUploadCoroutine，本地成绩仍保存" tag:PMRowBlockUpload on:PMBlockUpload];
@@ -230,6 +232,7 @@ static NSTimer *gStatusTimer = nil;
         case PMRowAllPerfect:   PMAllPerfect = v;  break;
         case PMRowLockHP:       PMLockHP = v;      break;
         case PMRowUnlockAll:    PMUnlockAll = v;   break;
+        case PMRowPaidUnlock:   PMPaidUnlock = v;  break;
         case PMRowBlockUpload:  PMBlockUpload = v; break;
     }
     [self persist];
@@ -253,6 +256,7 @@ static NSTimer *gStatusTimer = nil;
     [d setBool:PMAllPerfect forKey:@"pm.ap"];
     [d setBool:PMLockHP forKey:@"pm.hp"];
     [d setBool:PMUnlockAll forKey:@"pm.unlock"];
+    [d setBool:PMPaidUnlock forKey:@"pm.paid"];
     [d setBool:PMBlockUpload forKey:@"pm.block"];
     [d setFloat:PMSpeed forKey:@"pm.speed"];
 }

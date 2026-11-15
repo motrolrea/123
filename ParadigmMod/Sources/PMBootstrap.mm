@@ -13,11 +13,12 @@ static void PMBootstrap(void) {
     PMAllPerfect  = [d boolForKey:@"pm.ap"];
     PMLockHP      = [d boolForKey:@"pm.hp"];
     PMUnlockAll   = [d boolForKey:@"pm.unlock"];
+    PMPaidUnlock  = [d boolForKey:@"pm.paid"];
     PMBlockUpload = [d boolForKey:@"pm.block"];
     PMSpeed       = [d objectForKey:@"pm.speed"]  ? [d floatForKey:@"pm.speed"] : 1.0f;
 
-    PMLog(@"dylib 已加载（4.13 基线），autoplay=%d ap=%d hp=%d unlock=%d block=%d speed=%.2f",
-          PMAutoPlay, PMAllPerfect, PMLockHP, PMUnlockAll, PMBlockUpload, PMSpeed);
+    PMLog(@"dylib 已加载（4.13 基线），autoplay=%d ap=%d hp=%d unlock=%d paid=%d block=%d speed=%.2f",
+          PMAutoPlay, PMAllPerfect, PMLockHP, PMUnlockAll, PMPaidUnlock, PMBlockUpload, PMSpeed);
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         for (int i = 0; i < 90; i++) {

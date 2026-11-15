@@ -11,6 +11,7 @@ extern bool PMAutoPlay;
 extern bool PMAllPerfect;
 extern bool PMLockHP;
 extern bool PMUnlockAll;
+extern bool PMPaidUnlock;
 extern bool PMBlockUpload;
 extern float PMSpeed;
 
