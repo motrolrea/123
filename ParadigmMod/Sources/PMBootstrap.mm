@@ -20,11 +20,20 @@ static void PMBootstrap(void) {
     PMLockHP      = [d boolForKey:@"pm.hp"];
     PMUnlockAll   = [d boolForKey:@"pm.unlock"];
     PMPaidUnlock  = [d boolForKey:@"pm.paid"];
+    PMUnlockCollection = [d boolForKey:@"pm.coll"];
     PMBlockUpload = [d boolForKey:@"pm.block"];
     PMSpeed       = [d objectForKey:@"pm.speed"]  ? [d floatForKey:@"pm.speed"] : 1.0f;
 
     PMLog(@"dylib 已加载（4.13 基线），autoplay=%d ap=%d hp=%d unlock=%d paid=%d block=%d speed=%.2f",
           PMAutoPlay, PMAllPerfect, PMLockHP, PMUnlockAll, PMPaidUnlock, PMBlockUpload, PMSpeed);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 悬浮球独立于 hook 安装，先显示出来
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            PMShowOverlay();
+        });
+    });
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         for (int i = 0; i < 90; i++) {
@@ -49,10 +58,5 @@ static void PMBootstrap(void) {
         });
         dispatch_resume(t);
         gTimer = t;
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            PMShowOverlay();
-        });
     });
 }

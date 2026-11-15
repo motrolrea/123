@@ -12,16 +12,19 @@ typedef NS_ENUM(NSInteger, PMRowTag) {
     PMRowLockHP,
     PMRowUnlockAll,
     PMRowPaidUnlock,
+    PMRowUnlockCollection,
     PMRowBlockUpload,
 };
 
 @interface PMSettingsController : UIViewController
+@property (nonatomic, copy) void (^onDismiss)(void);
 @end
 
 @interface PMLogViewController : UIViewController
 @end
 
-static UIWindow *gWindow = nil;
+static UIWindow *gBallWindow = nil;
+static UIWindow *gPanelWindow = nil;
 static UILabel *gStatusLabel = nil;
 static NSTimer *gStatusTimer = nil;
 
@@ -66,18 +69,38 @@ static NSTimer *gStatusTimer = nil;
 }
 
 - (void)onPan:(UIPanGestureRecognizer *)g {
-    CGPoint t = [g translationInView:self.superview];
-    self.center = CGPointMake(self.center.x + t.x, self.center.y + t.y);
-    [g setTranslation:CGPointMake(0, 0) inView:self.superview];
+    UIView *win = self.window;
+    if (!win) return;
+    CGPoint t = [g translationInView:nil];
+    CGRect f = win.frame;
+    f.origin.x += t.x;
+    f.origin.y += t.y;
+    win.frame = f;
+    [g setTranslation:CGPointMake(0, 0) inView:nil];
 }
 
 - (void)onTap {
-    UIViewController *root = gWindow.rootViewController;
-    if (root.presentedViewController) {
-        [root dismissViewControllerAnimated:YES completion:nil];
-    } else {
-        [root presentViewController:[PMSettingsController new] animated:YES completion:nil];
+    if (gPanelWindow && !gPanelWindow.hidden) {
+        gPanelWindow.hidden = YES;
+        gPanelWindow = nil;
+        return;
     }
+    UIWindowScene *scene = nil;
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+        if ([s isKindOfClass:UIWindowScene.class]) { scene = (UIWindowScene *)s; break; }
+    }
+    gPanelWindow = scene ? [[UIWindow alloc] initWithWindowScene:scene]
+                         : [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    gPanelWindow.frame = UIScreen.mainScreen.bounds;
+    gPanelWindow.windowLevel = UIWindowLevelAlert + 2;
+    gPanelWindow.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+    PMSettingsController *vc = [PMSettingsController new];
+    vc.onDismiss = ^{
+        gPanelWindow.hidden = YES;
+        gPanelWindow = nil;
+    };
+    gPanelWindow.rootViewController = vc;
+    gPanelWindow.hidden = NO;
 }
 @end
 
@@ -109,6 +132,7 @@ static NSTimer *gStatusTimer = nil;
     [self addSection:@"解锁"];
     [self addSwitch:@"全曲 / 全难度解锁" detail:@"写入 TrackUnlockStorage.UnlockAll" tag:PMRowUnlockAll on:PMUnlockAll];
     [self addSwitch:@"解锁付费曲包（本地）" detail:@"仅本地把 IsPurchased 判为 true，服务端仍视为未购买" tag:PMRowPaidUnlock on:PMPaidUnlock];
+    [self addSwitch:@"解锁收藏品 / 角色 / 挑战" detail:@"本地把 IsRelicUnlocked / IsCharacterUnlocked / IsChallengeUnlocked 判为 true" tag:PMRowUnlockCollection on:PMUnlockCollection];
 
     [self addSection:@"网络"];
     [self addSwitch:@"屏蔽成绩上传" detail:@"拦截 BackendAPI.ScoreUploadCoroutine，本地成绩仍保存" tag:PMRowBlockUpload on:PMBlockUpload];
@@ -152,7 +176,7 @@ static NSTimer *gStatusTimer = nil;
 - (void)onClose {
     [gStatusTimer invalidate];
     gStatusTimer = nil;
-    [self dismissViewControllerAnimated:YES completion:nil];
+    if (self.onDismiss) self.onDismiss();
 }
 
 - (void)addHeader {
@@ -245,6 +269,7 @@ static NSTimer *gStatusTimer = nil;
         case PMRowLockHP:       PMLockHP = v;      break;
         case PMRowUnlockAll:    PMUnlockAll = v;   break;
         case PMRowPaidUnlock:   PMPaidUnlock = v;  break;
+        case PMRowUnlockCollection: PMUnlockCollection = v; break;
         case PMRowBlockUpload:  PMBlockUpload = v; break;
     }
     [self persist];
@@ -269,6 +294,7 @@ static NSTimer *gStatusTimer = nil;
     [d setBool:PMLockHP forKey:@"pm.hp"];
     [d setBool:PMUnlockAll forKey:@"pm.unlock"];
     [d setBool:PMPaidUnlock forKey:@"pm.paid"];
+    [d setBool:PMUnlockCollection forKey:@"pm.coll"];
     [d setBool:PMBlockUpload forKey:@"pm.block"];
     [d setFloat:PMSpeed forKey:@"pm.speed"];
 }
@@ -369,24 +395,24 @@ static NSTimer *gStatusTimer = nil;
 // ---------------------------------------------------------------------------
 void PMShowOverlay(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (gWindow) return;
+        if (gBallWindow) return;
         UIWindowScene *scene = nil;
         for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
             if ([s isKindOfClass:UIWindowScene.class]) { scene = (UIWindowScene *)s; break; }
         }
-        gWindow = scene ? [[UIWindow alloc] initWithWindowScene:scene]
-                        : [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-        gWindow.windowLevel = UIWindowLevelAlert + 1;
-        gWindow.backgroundColor = UIColor.clearColor;
-
+        CGFloat side = 56;
+        CGRect frame = CGRectMake(24, 120, side, side);
+        gBallWindow = scene ? [[UIWindow alloc] initWithWindowScene:scene]
+                            : [[UIWindow alloc] initWithFrame:frame];
+        gBallWindow.frame = frame;                       // 只占球大小，不覆盖全屏
+        gBallWindow.windowLevel = UIWindowLevelAlert + 1;
+        gBallWindow.backgroundColor = UIColor.clearColor;
         UIViewController *root = [UIViewController new];
-        root.view = [[PMPassthroughView alloc] initWithFrame:UIScreen.mainScreen.bounds];
         root.view.backgroundColor = UIColor.clearColor;
-        gWindow.rootViewController = root;
-        gWindow.hidden = NO;   // 不 makeKeyAndVisible
-
-        PMBallView *ball = [[PMBallView alloc] initWithFrame:CGRectMake(24, 120, 52, 52)];
+        gBallWindow.rootViewController = root;
+        PMBallView *ball = [[PMBallView alloc] initWithFrame:CGRectMake(0, 0, side, side)];
         [root.view addSubview:ball];
+        gBallWindow.hidden = NO;
         PMLog(@"悬浮球已创建");
     });
 }

@@ -37,6 +37,7 @@ bool PMAllPerfect = false;
 bool PMLockHP = false;
 bool PMUnlockAll = false;
 bool PMPaidUnlock = false;
+bool PMUnlockCollection = false;
 bool PMBlockUpload = false;
 float PMSpeed = 1.0f;
 
@@ -54,6 +55,9 @@ static const uintptr_t kRVA_GameControl_AddHP        = 0x01079DC8;
 static const uintptr_t kRVA_BackendAPI_Run           = 0x01331700;
 static const uintptr_t kRVA_Store_IsPurchasedStr     = 0x013644D0;
 static const uintptr_t kRVA_Store_IsPurchasedEnum    = 0x01364574;
+static const uintptr_t kRVA_PlayerHelper_IsRelic      = 0x0126263C;
+static const uintptr_t kRVA_PlayerHelper_IsCharacter  = 0x012627C8;
+static const uintptr_t kRVA_Challenge_IsUnlocked      = 0x0110FD9C;
 
 // JudgeSystem / JudgeSlot / List 字段偏移
 static const size_t kOff_JS_Slots = 0x10;
@@ -532,6 +536,28 @@ static bool pm_IsPurchasedEnum_hook(int product, void *method) {
 }
 
 // ---------------------------------------------------------------------------
+// Hook: 收藏品 / 角色 / 挑战 本地解锁
+// ---------------------------------------------------------------------------
+static bool (*orig_IsRelicUnlocked)(void *arg, void *method) = NULL;
+static bool (*orig_IsCharacterUnlocked)(void *arg, void *method) = NULL;
+static bool (*orig_IsChallengeUnlocked)(void *arg, void *method) = NULL;
+
+static bool pm_IsRelicUnlocked_hook(void *arg, void *method) {
+    if (__atomic_load_n(&PMUnlockCollection, __ATOMIC_RELAXED)) return true;
+    return orig_IsRelicUnlocked ? orig_IsRelicUnlocked(arg, method) : false;
+}
+
+static bool pm_IsCharacterUnlocked_hook(void *arg, void *method) {
+    if (__atomic_load_n(&PMUnlockCollection, __ATOMIC_RELAXED)) return true;
+    return orig_IsCharacterUnlocked ? orig_IsCharacterUnlocked(arg, method) : false;
+}
+
+static bool pm_IsChallengeUnlocked_hook(void *arg, void *method) {
+    if (__atomic_load_n(&PMUnlockCollection, __ATOMIC_RELAXED)) return true;
+    return orig_IsChallengeUnlocked ? orig_IsChallengeUnlocked(arg, method) : false;
+}
+
+// ---------------------------------------------------------------------------
 // 周期任务：全解锁 / 变速
 // ---------------------------------------------------------------------------
 static float gOrigHiSpeed = 1.0f;
@@ -607,11 +633,18 @@ void PMInstallHooks(void) {
         (void *)((char *)base + kRVA_Store_IsPurchasedStr), (void *)pm_IsPurchasedStr_hook);
     orig_IsPurchasedEnum = (bool (*)(int, void *))pm_install_hook(
         (void *)((char *)base + kRVA_Store_IsPurchasedEnum), (void *)pm_IsPurchasedEnum_hook);
+    orig_IsRelicUnlocked = (bool (*)(void *, void *))pm_install_hook(
+        (void *)((char *)base + kRVA_PlayerHelper_IsRelic), (void *)pm_IsRelicUnlocked_hook);
+    orig_IsCharacterUnlocked = (bool (*)(void *, void *))pm_install_hook(
+        (void *)((char *)base + kRVA_PlayerHelper_IsCharacter), (void *)pm_IsCharacterUnlocked_hook);
+    orig_IsChallengeUnlocked = (bool (*)(void *, void *))pm_install_hook(
+        (void *)((char *)base + kRVA_Challenge_IsUnlocked), (void *)pm_IsChallengeUnlocked_hook);
 
     PMHookReady = (orig_UpdateTime != NULL);
-    PMLog(@"hooks: updateTime=%d setResult=%d addHP=%d run=%d isPurchasedStr=%d isPurchasedEnum=%d il2cpp=%d cryptid=%d",
+    PMLog(@"hooks: updateTime=%d setResult=%d addHP=%d run=%d purchased=%d/%d collection=%d/%d/%d cryptid=%d",
           orig_UpdateTime != NULL, orig_SetResult != NULL, orig_AddHP != NULL,
-          orig_Run != NULL, orig_IsPurchasedStr != NULL, orig_IsPurchasedEnum != NULL, api,
+          orig_Run != NULL, orig_IsPurchasedStr != NULL, orig_IsPurchasedEnum != NULL,
+          orig_IsRelicUnlocked != NULL, orig_IsCharacterUnlocked != NULL, orig_IsChallengeUnlocked != NULL,
           PMUnityCryptid());
     if (PMUnityCryptid() == 1) {
         PMLog(@"⚠️ UnityFramework cryptid=1，应用未砸壳：内存补丁会被系统拦截，hook 很可能全部失效");
