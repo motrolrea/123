@@ -16,6 +16,7 @@
 #import "PMCommon.h"
 #import <objc/runtime.h>
 #include <dlfcn.h>
+#include <mach-o/dyld.h>
 #include <mach/mach.h>
 #include <mach/vm_map.h>
 #include <sys/mman.h>
@@ -38,7 +39,7 @@ volatile int PMAutoJudged = 0;
 volatile bool PMHookReady = false;
 volatile bool PMIl2CppReady = false;
 volatile bool PMUnlockAllApplied = false;
-volatile bool PMUploadBlocked = 0;
+volatile int PMUploadBlocked = 0;
 
 // 4.13 关键 RVA（文件偏移 == VM 地址，__TEXT vmaddr = 0）
 static const uintptr_t kRVA_JudgeSystem_UpdateTime = 0x012EAE08;
