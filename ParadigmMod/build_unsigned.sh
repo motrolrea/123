@@ -27,7 +27,7 @@ COMMON=(
   -dynamiclib
   -framework Foundation
   -framework UIKit
-  -lobjc
+  -framework CoreGraphics
 )
 
 # 1) framework 形式（LC_LOAD_DYLIB 指向 @loader_path/../ParadigmMod.framework/ParadigmMod）
