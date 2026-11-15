@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""把 ParadigmMod.framework 注入解包后的 4.13 Payload，产出未签名 IPA。
+
+用法：
+  python tools/package_unsigned_ipa.py \
+      --source "e:\\Trae CN\\Clock\\_re\\ipa" \
+      --framework "ParadigmMod/build/ParadigmMod.framework" \
+      --output "ParadigmMod_4.13_unsigned.ipa"
+
+输出刻意保持未签名，装普通设备前必须用证书/描述文件重新签名（TrollStore 除外）。
+"""
+from __future__ import annotations
+import argparse
+import plistlib
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import uuid
+import zipfile
+from pathlib import Path
+
+DEPENDENCY = "@loader_path/../ParadigmMod.framework/ParadigmMod"
+EXPECTED_UUID = "964f6391cd6c33788f84dd0aae540677"
+
+
+def find_app(payload: Path) -> Path:
+    apps = list(payload.glob("*.app"))
+    if len(apps) != 1:
+        raise RuntimeError(f"expected exactly one app under Payload, found {len(apps)}")
+    return apps[0]
+
+
+def macho_uuid(path: Path) -> str | None:
+    data = path.read_bytes()[:0x10000]
+    magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, _ = struct.unpack_from("<IiiIIIII", data, 0)
+    if magic != 0xFEEDFACF:
+        return None
+    off = 32
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack_from("<II", data, off)
+        if cmd == 0x1B and cmdsize >= 24:
+            return uuid.UUID(bytes=bytes(data[off + 8:off + 24])).hex
+        off += cmdsize
+    return None
+
+
+def strip_signatures(app: Path) -> None:
+    for signature in app.rglob("_CodeSignature"):
+        if signature.is_dir():
+            shutil.rmtree(signature)
+    for provision in app.rglob("embedded.mobileprovision"):
+        provision.unlink()
+
+
+def zip_tree(root: Path, output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            name = path.relative_to(root).as_posix()
+            entry = zipfile.ZipInfo.from_file(path, name)
+            entry.create_system = 3
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            entry.external_attr = (0o100755 if path.stat().st_mode & 0o111 else 0o100644) << 16
+            with path.open("rb") as src, archive.open(entry, "w", force_zip64=True) as dst:
+                shutil.copyfileobj(src, dst, 1024 * 1024)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--source", required=True, type=Path, help="含 Payload 的目录")
+    ap.add_argument("--framework", required=True, type=Path)
+    ap.add_argument("--output", required=True, type=Path)
+    ap.add_argument("--skip-version-gate", action="store_true")
+    args = ap.parse_args()
+
+    payload = args.source / "Payload"
+    if not payload.is_dir():
+        raise RuntimeError(f"missing Payload: {payload}")
+    exe = args.framework / "ParadigmMod"
+    if not exe.is_file():
+        raise RuntimeError(f"missing framework executable: {exe}")
+
+    app = find_app(payload)
+    unity = app / "Frameworks/UnityFramework.framework/UnityFramework"
+    got = macho_uuid(unity)
+    print(f"UnityFramework UUID: {got}")
+    if not args.skip_version_gate and got != EXPECTED_UUID:
+        raise RuntimeError(
+            f"版本门禁不匹配：需要 4.13 ({EXPECTED_UUID})，当前 {got}。"
+            "如确认要强行打包，可加 --skip-version-gate（Hook 地址很可能不对）。"
+        )
+
+    tools = Path(__file__).resolve().parent
+    with tempfile.TemporaryDirectory(prefix="paradigmmod-", dir=str(args.output.parent)) as tmp:
+        stage = Path(tmp)
+        shutil.copytree(payload, stage / "Payload", symlinks=True,
+                        ignore=shutil.ignore_patterns("*.before-paradigmmod", "*.ipa"))
+        app = find_app(stage / "Payload")
+        destination = app / "Frameworks" / "ParadigmMod.framework"
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(args.framework, destination, symlinks=True)
+
+        unity = app / "Frameworks" / "UnityFramework.framework" / "UnityFramework"
+        subprocess.run([sys.executable, str(tools / "inject_load_dylib.py"),
+                        str(unity), DEPENDENCY, "--no-backup"], check=True)
+
+        info = plistlib.loads((app / "Info.plist").read_bytes())
+        print(f"target: {info.get('CFBundleDisplayName')} {info.get('CFBundleShortVersionString')}")
+
+        strip_signatures(app)
+        zip_tree(stage, args.output)
+
+    print(f"unsigned IPA -> {args.output}")
+    print("安装前请对 ParadigmMod.framework / UnityFramework.framework / App 重新签名。")
+
+
+if __name__ == "__main__":
+    main()

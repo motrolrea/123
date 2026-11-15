@@ -1,0 +1,31 @@
+# ---- 游戏资源（体积大，不入库）----
+down*
+songs/
+*.ipa
+*.bundle
+*.assets
+*.resS
+*.resource
+dump/
+il2cpp_out/
+DummyDll/
+
+# ---- 凭据 ----
+config.json
+*.token
+*.secret
+
+# ---- 构建产物 ----
+build/
+*.o
+*.dylib
+*.framework/
+DerivedData/
+
+# ---- 系统/编辑器 ----
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+.vscode/
+.idea/

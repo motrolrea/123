@@ -1,0 +1,43 @@
+name: Build ParadigmMod
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Build dylib + framework
+        run: |
+          chmod +x ParadigmMod/build_unsigned.sh
+          bash ParadigmMod/build_unsigned.sh
+
+      - name: Verify
+        run: |
+          file ParadigmMod/build/ParadigmMod.dylib
+          otool -L ParadigmMod/build/ParadigmMod.dylib
+          otool -l ParadigmMod/build/ParadigmMod.dylib | grep -A2 LC_BUILD_VERSION || true
+
+      - name: Package
+        run: |
+          cd ParadigmMod/build
+          zip -r ParadigmMod-dylib.zip ParadigmMod.dylib
+          zip -r ParadigmMod-framework.zip ParadigmMod.framework
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ParadigmMod-dylib
+          path: ParadigmMod/build/ParadigmMod-dylib.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ParadigmMod-framework
+          path: ParadigmMod/build/ParadigmMod-framework.zip
