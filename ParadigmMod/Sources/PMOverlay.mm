@@ -217,7 +217,7 @@ static void pm_open_panel(void);
     CGRect f = win.frame;
     f.origin.x += t.x;
     f.origin.y += t.y;
-    CGRect sb = UIScreen.mainScreen.bounds;
+    CGRect sb = win.windowScene ? win.windowScene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
     f.origin.x = MAX(0, MIN(sb.size.width - f.size.width, f.origin.x));
     f.origin.y = MAX(24, MIN(sb.size.height - f.size.height - 24, f.origin.y));
     win.frame = f;
@@ -266,32 +266,52 @@ static UIWindowScene *pm_active_scene(void) {
 
 @implementation PMSettingsController {
     UIScrollView *_scroll;
+    PMTabBar *_tabBar;
+    UIButton *_closeButton;
     CGFloat _y;
     NSInteger _tab;
 }
+
+- (BOOL)shouldAutorotate { return NO; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation { return UIInterfaceOrientationLandscapeRight; }
+- (UIStatusBarStyle)preferredStatusBarStyle { return UIStatusBarStyleLightContent; }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = PMBGColor();
 
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(20, 22, self.view.bounds.size.width - 40, 30)];
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(20, 14, self.view.bounds.size.width - 90, 28)];
     title.text = @"ParadigmMod";
-    title.font = [UIFont italicSystemFontOfSize:23];
+    title.font = [UIFont italicSystemFontOfSize:22];
     title.textColor = UIColor.whiteColor;
+    title.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:title];
 
-    UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(20, 50, self.view.bounds.size.width - 40, 18)];
+    UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(20, 40, self.view.bounds.size.width - 90, 16)];
     sub.text = @"范式：起源 4.13 · 注入版";
     sub.font = [UIFont systemFontOfSize:11];
     sub.textColor = [UIColor colorWithWhite:1 alpha:0.45];
+    sub.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [self.view addSubview:sub];
 
-    PMTabBar *tab = [[PMTabBar alloc] initWithFrame:CGRectMake(16, 76, self.view.bounds.size.width - 32, 40)];
-    __weak PMSettingsController *weakSelf = self;
-    tab.onSelect = ^(NSInteger index) { [weakSelf switchTab:index]; };
-    [self.view addSubview:tab];
+    _closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_closeButton setTitle:@"✕" forState:UIControlStateNormal];
+    [_closeButton setTitleColor:[UIColor colorWithWhite:1 alpha:0.9] forState:UIControlStateNormal];
+    _closeButton.titleLabel.font = [UIFont boldSystemFontOfSize:22];
+    _closeButton.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
+    _closeButton.layer.cornerRadius = 20;
+    _closeButton.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    [_closeButton addTarget:self action:@selector(onClose) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_closeButton];
 
-    _scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 124, self.view.bounds.size.width, self.view.bounds.size.height - 124)];
+    _tabBar = [[PMTabBar alloc] initWithFrame:CGRectMake(16, 62, self.view.bounds.size.width - 32, 38)];
+    _tabBar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    __weak PMSettingsController *weakSelf = self;
+    _tabBar.onSelect = ^(NSInteger index) { [weakSelf switchTab:index]; };
+    [self.view addSubview:_tabBar];
+
+    _scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 106, self.view.bounds.size.width, self.view.bounds.size.height - 106)];
     _scroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _scroll.alwaysBounceVertical = YES;
     _scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
@@ -305,6 +325,14 @@ static UIWindowScene *pm_active_scene(void) {
     [self rebuild];
 }
 
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    CGFloat w = self.view.bounds.size.width;
+    CGFloat h = self.view.bounds.size.height;
+    _closeButton.frame = CGRectMake(w - 22 - 40, 14, 40, 40);
+    _scroll.frame = CGRectMake(0, 106, w, h - 106);
+}
+
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     [NSNotificationCenter.defaultCenter removeObserver:self];
@@ -312,7 +340,7 @@ static UIWindowScene *pm_active_scene(void) {
 
 - (void)onKeyboard:(NSNotification *)n {
     CGRect kb = [n.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
-    CGFloat overlap = MAX(0, self.view.bounds.size.height - kb.origin.y - 124);
+    CGFloat overlap = MAX(0, self.view.bounds.size.height - kb.origin.y - 106);
     UIEdgeInsets inset = _scroll.contentInset;
     inset.bottom = (n.name == UIKeyboardWillHideNotification) ? 0 : overlap;
     _scroll.contentInset = inset;
@@ -750,9 +778,10 @@ static void pm_open_panel(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (gPanelWindow) return;
         UIWindowScene *scene = pm_active_scene();
+        CGRect sb = scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
         gPanelWindow = scene ? [[UIWindow alloc] initWithWindowScene:scene]
-                             : [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-        gPanelWindow.frame = UIScreen.mainScreen.bounds;
+                             : [[UIWindow alloc] initWithFrame:sb];
+        gPanelWindow.frame = sb;
         gPanelWindow.windowLevel = UIWindowLevelAlert + 2;
         gPanelWindow.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
         PMSettingsController *vc = [PMSettingsController new];
@@ -762,6 +791,7 @@ static void pm_open_panel(void) {
         };
         gPanelWindow.rootViewController = vc;
         gPanelWindow.hidden = NO;
+        [UIViewController attemptRotationToDeviceOrientation];
     });
 }
 
@@ -772,7 +802,8 @@ void PMUpdateBall(void) {
         for (UIView *v in host.subviews) [v removeFromSuperview];
         host.backgroundColor = UIColor.clearColor;
 
-        CGRect sb = UIScreen.mainScreen.bounds;
+        UIWindowScene *scene = pm_active_scene();
+        CGRect sb = scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
         if (PMBallVisible) {
             CGFloat side = 56;
             NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
