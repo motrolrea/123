@@ -119,10 +119,13 @@ static void pm_emit_branch(uint32_t *code, uintptr_t target) {
 static void *pm_alloc_trampoline(void) {
     void *p = mmap(NULL, vm_page_size, PROT_READ | PROT_WRITE | PROT_EXEC,
                    MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (p == MAP_FAILED) {
-        p = mmap(NULL, vm_page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (p == MAP_FAILED) return NULL;
-        mprotect(p, vm_page_size, PROT_READ | PROT_WRITE | PROT_EXEC);
+    if (p != MAP_FAILED) return p;
+    // 没有 JIT 权限时不允许 RWX：先 RW，再尝试 RX
+    p = mmap(NULL, vm_page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) return NULL;
+    if (mprotect(p, vm_page_size, PROT_READ | PROT_EXEC) != 0) {
+        munmap(p, vm_page_size);
+        return NULL;   // 无法执行就放弃 hook，避免跳到不可执行页崩溃
     }
     return p;
 }

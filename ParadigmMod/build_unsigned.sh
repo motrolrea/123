@@ -25,6 +25,8 @@ COMMON=(
   -fobjc-arc
   -O2
   -dynamiclib
+  # 老版本签名工具（ldid / 全能签等）对 chained fixups 支持不好，退回经典 bind opcodes
+  -Wl,-no_fixup_chains
   -framework Foundation
   -framework UIKit
   -framework CoreGraphics
