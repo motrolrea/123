@@ -21,6 +21,10 @@
 #include <mach/vm_map.h>
 #include <sys/mman.h>
 #include <string.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <time.h>
+#include <os/lock.h>
 #include <math.h>
 #include <ctype.h>
 #include <libkern/OSCacheControl.h>
@@ -66,14 +70,88 @@ static const int kJudgeReceived = 3;
 static const int kJudgeLost = 4;
 
 // ---------------------------------------------------------------------------
-// 日志
+// 日志：NSLog + 文件（Documents/ParadigmMod.log，超过 2MB 自动清空）
 // ---------------------------------------------------------------------------
+static os_unfair_lock gLogLock = OS_UNFAIR_LOCK_INIT;
+static NSString *gLogPath = nil;
+
+static NSString *PMLogPath(void) {
+    if (gLogPath) return gLogPath;
+    NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *dir = dirs.count ? dirs[0] : NSTemporaryDirectory();
+    gLogPath = [dir stringByAppendingPathComponent:@"ParadigmMod.log"];
+    return gLogPath;
+}
+
+static void pm_log_write(NSString *line) {
+    os_unfair_lock_lock(&gLogLock);
+    @autoreleasepool {
+        NSString *path = PMLogPath();
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSUInteger limit = 2 * 1024 * 1024;
+        if ([fm fileExistsAtPath:path]) {
+            NSDictionary *attrs = [fm attributesOfItemAtPath:path error:NULL];
+            if ([attrs[NSFileSize] unsignedLongLongValue] > limit) {
+                [fm removeItemAtPath:path error:NULL];
+            }
+        }
+        if (![fm fileExistsAtPath:path]) {
+            [[line stringByAppendingString:@"\n"] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        } else {
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+            @try {
+                [fh seekToEndOfFile];
+                [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
+                [fh closeFile];
+            } @catch (NSException *e) {
+            }
+        }
+    }
+    os_unfair_lock_unlock(&gLogLock);
+}
+
+static NSString *pm_timestamp(void) {
+    struct tm t;
+    time_t now = time(NULL);
+    localtime_r(&now, &t);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d", t.tm_hour, t.tm_min, t.tm_sec);
+    return [NSString stringWithUTF8String:buf];
+}
+
 void PMLog(NSString *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
     NSLog(@"[ParadigmMod] %@", msg);
+    pm_log_write([NSString stringWithFormat:@"%@ [%@] %@", pm_timestamp(), NSThread.currentThread.name ?: @"?", msg]);
+}
+
+NSString *PMLogTail(NSUInteger maxLines) {
+    os_unfair_lock_lock(&gLogLock);
+    NSString *content = [NSString stringWithContentsOfFile:PMLogPath() encoding:NSUTF8StringEncoding error:NULL];
+    os_unfair_lock_unlock(&gLogLock);
+    if (!content.length) return @"(还没有日志)";
+    if (maxLines == 0) return content;
+    NSArray<NSString *> *lines = [content componentsSeparatedByString:@"\n"];
+    if (lines.count <= maxLines) return content;
+    return [[lines subarrayWithRange:NSMakeRange(lines.count - maxLines, maxLines)] componentsJoinedByString:@"\n"];
+}
+
+void PMLogClear(void) {
+    os_unfair_lock_lock(&gLogLock);
+    [NSFileManager.defaultManager removeItemAtPath:PMLogPath() error:NULL];
+    os_unfair_lock_unlock(&gLogLock);
+}
+
+static void pm_uncaught_handler(NSException *e) {
+    PMLog(@"💥 未捕获异常 %@: %@\n%@", e.name, e.reason, [e.callStackSymbols componentsJoinedByString:@"\n"]);
+}
+
+void PMLogInstallCrashHandler(void) {
+    NSSetUncaughtExceptionHandler(&pm_uncaught_handler);
+    PMLog(@"日志文件: %@", PMLogPath());
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +170,27 @@ void *PMUnityBase(void) {
         }
     }
     return NULL;
+}
+
+// 读取自身 Mach-O 的 cryptid（1 = 未砸壳 / FairPlay 加密）
+static int pm_macho_cryptid(void *base) {
+    uint32_t *p = (uint32_t *)base;
+    if (!p || p[0] != 0xFEEDFACF) return -1;
+    uint32_t ncmds = p[4];
+    uintptr_t off = 32;
+    for (uint32_t i = 0; i < ncmds; i++) {
+        uint32_t cmd = *(uint32_t *)((char *)base + off);
+        uint32_t cmdsize = *(uint32_t *)((char *)base + off + 4);
+        if (cmdsize < 8) break;
+        if (cmd == 0x2C) return *(int *)((char *)base + off + 16);
+        off += cmdsize;
+    }
+    return -1;
+}
+
+int PMUnityCryptid(void) {
+    void *b = PMUnityBase();
+    return b ? pm_macho_cryptid(b) : -2;
 }
 
 // ---------------------------------------------------------------------------
@@ -475,8 +574,12 @@ void PMInstallHooks(void) {
         (void *)((char *)base + kRVA_Store_IsPurchasedEnum), (void *)pm_IsPurchasedEnum_hook);
 
     PMHookReady = (orig_UpdateTime != NULL);
-    PMLog(@"hooks: updateTime=%d setResult=%d addHP=%d run=%d isPurchasedStr=%d isPurchasedEnum=%d il2cpp=%d",
+    PMLog(@"hooks: updateTime=%d setResult=%d addHP=%d run=%d isPurchasedStr=%d isPurchasedEnum=%d il2cpp=%d cryptid=%d",
           orig_UpdateTime != NULL, orig_SetResult != NULL, orig_AddHP != NULL,
-          orig_Run != NULL, orig_IsPurchasedStr != NULL, orig_IsPurchasedEnum != NULL, api);
+          orig_Run != NULL, orig_IsPurchasedStr != NULL, orig_IsPurchasedEnum != NULL, api,
+          PMUnityCryptid());
+    if (PMUnityCryptid() == 1) {
+        PMLog(@"⚠️ UnityFramework cryptid=1，应用未砸壳：内存补丁会被系统拦截，hook 很可能全部失效");
+    }
     pm_apply_static_settings();
 }

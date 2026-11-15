@@ -24,6 +24,10 @@ extern volatile bool PMUnlockAllApplied;
 extern volatile int PMUploadBlocked;
 
 void PMLog(NSString *fmt, ...);
+void PMLogInstallCrashHandler(void);
+NSString *PMLogTail(NSUInteger maxLines);
+void PMLogClear(void);
+int PMUnityCryptid(void);
 void *PMUnityBase(void);
 void PMInstallHooks(void);
 void PMApplySettingsNow(void);

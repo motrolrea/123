@@ -8,6 +8,12 @@ static dispatch_source_t gTimer = NULL;
 
 __attribute__((constructor))
 static void PMBootstrap(void) {
+    PMLogInstallCrashHandler();
+    NSBundle *bundle = [NSBundle mainBundle];
+    PMLog(@"启动: %@ %@ (%@)", bundle.bundleIdentifier,
+          [bundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"],
+          [bundle objectForInfoDictionaryKey:@"CFBundleVersion"]);
+
     NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
     PMAutoPlay    = [d objectForKey:@"pm.auto"]   ? [d boolForKey:@"pm.auto"]   : YES;
     PMAllPerfect  = [d boolForKey:@"pm.ap"];
@@ -30,6 +36,7 @@ static void PMBootstrap(void) {
             }
             [NSThread sleepForTimeInterval:1.0];
         }
+        PMLog(@"hook 安装结束: ready=%d cryptid=%d", PMHookReady, PMUnityCryptid());
 
         // 静态字段（全解锁 / 变速）需要周期性重写
         dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());

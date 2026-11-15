@@ -18,6 +18,9 @@ typedef NS_ENUM(NSInteger, PMRowTag) {
 @interface PMSettingsController : UIViewController
 @end
 
+@interface PMLogViewController : UIViewController
+@end
+
 static UIWindow *gWindow = nil;
 static UILabel *gStatusLabel = nil;
 static NSTimer *gStatusTimer = nil;
@@ -117,6 +120,15 @@ static NSTimer *gStatusTimer = nil;
     gStatusLabel.textColor = [UIColor colorWithWhite:0.8 alpha:1];
     [_scroll addSubview:gStatusLabel];
     _y += 100;
+
+    UIButton *logBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    logBtn.frame = CGRectMake(20, _y, self.view.bounds.size.width - 40, 44);
+    [logBtn setTitle:@"查看运行日志" forState:UIControlStateNormal];
+    logBtn.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
+    logBtn.layer.cornerRadius = 12;
+    [logBtn addTarget:self action:@selector(onShowLog) forControlEvents:UIControlEventTouchUpInside];
+    [_scroll addSubview:logBtn];
+    _y += 52;
 
     UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
     close.frame = CGRectMake(20, _y, self.view.bounds.size.width - 40, 44);
@@ -269,6 +281,85 @@ static NSTimer *gStatusTimer = nil;
         PMLastSlotCount, PMAutoJudged,
         PMUnlockAllApplied ? @"on" : @"off",
         PMUploadBlocked];
+}
+
+- (void)onShowLog {
+    [self presentViewController:[PMLogViewController new] animated:YES completion:nil];
+}
+
+@end
+
+// ---------------------------------------------------------------------------
+// 日志查看页
+// ---------------------------------------------------------------------------
+@implementation PMLogViewController {
+    UITextView *_text;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor colorWithWhite:0.06 alpha:1];
+    CGFloat w = self.view.bounds.size.width;
+    CGFloat h = self.view.bounds.size.height;
+
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(20, 48, w - 40, 28)];
+    title.text = @"运行日志";
+    title.font = [UIFont boldSystemFontOfSize:20];
+    title.textColor = UIColor.whiteColor;
+    [self.view addSubview:title];
+
+    _text = [[UITextView alloc] initWithFrame:CGRectMake(12, 84, w - 24, h - 200)];
+    _text.editable = NO;
+    _text.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
+    _text.layer.cornerRadius = 10;
+    _text.textColor = [UIColor colorWithWhite:0.92 alpha:1];
+    _text.font = [UIFont fontWithName:@"Menlo" size:10] ?: [UIFont systemFontOfSize:10];
+    _text.text = PMLogTail(1000);
+    [self.view addSubview:_text];
+
+    CGFloat by = h - 104;
+    UIButton *clear = [UIButton buttonWithType:UIButtonTypeSystem];
+    clear.frame = CGRectMake(12, by, (w - 36) / 3, 42);
+    [clear setTitle:@"清空" forState:UIControlStateNormal];
+    clear.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
+    clear.layer.cornerRadius = 10;
+    [clear addTarget:self action:@selector(onClear) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:clear];
+
+    UIButton *share = [UIButton buttonWithType:UIButtonTypeSystem];
+    share.frame = CGRectMake(24 + (w - 36) / 3, by, (w - 36) / 3, 42);
+    [share setTitle:@"分享" forState:UIControlStateNormal];
+    share.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
+    share.layer.cornerRadius = 10;
+    [share addTarget:self action:@selector(onShare:) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:share];
+
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    close.frame = CGRectMake(36 + 2 * (w - 36) / 3, by, (w - 36) / 3, 42);
+    [close setTitle:@"关闭" forState:UIControlStateNormal];
+    close.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
+    close.layer.cornerRadius = 10;
+    [close addTarget:self action:@selector(onClose) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:close];
+}
+
+- (void)onClear {
+    PMLogClear();
+    _text.text = @"(已清空)";
+}
+
+- (void)onShare:(UIButton *)sender {
+    UIActivityViewController *vc = [[UIActivityViewController alloc]
+        initWithActivityItems:@[PMLogTail(0)] applicationActivities:nil];
+    if (vc.popoverPresentationController) {
+        vc.popoverPresentationController.sourceView = sender;
+        vc.popoverPresentationController.sourceRect = sender.bounds;
+    }
+    [self presentViewController:vc animated:YES completion:nil];
+}
+
+- (void)onClose {
+    [self dismissViewControllerAnimated:YES completion:nil];
 }
 
 @end
