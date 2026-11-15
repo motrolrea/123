@@ -102,7 +102,8 @@ static UIBezierPath *PMSlant(CGRect r, CGFloat ratio) {
     UIRectFill(r);
     CGRect knob = CGRectMake(self.on ? r.size.width * 0.52 : 0, r.size.height * 0.18,
                              r.size.width * 0.48, r.size.height * 0.64);
-    [self.on ? UIColor.whiteColor : [UIColor colorWithWhite:1 alpha:0.35] setFill];
+    UIColor *knobColor = self.on ? UIColor.whiteColor : [UIColor colorWithWhite:1 alpha:0.35];
+    [knobColor setFill];
     [PMSlant(knob, 0.26) fill];
     NSString *t = self.on ? @"ON" : @"OFF";
     NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new];
@@ -286,7 +287,7 @@ static UIWindowScene *pm_active_scene(void) {
     [self.view addSubview:sub];
 
     PMTabBar *tab = [[PMTabBar alloc] initWithFrame:CGRectMake(16, 76, self.view.bounds.size.width - 32, 40)];
-    __weak typeof(self) weakSelf = self;
+    __weak PMSettingsController *weakSelf = self;
     tab.onSelect = ^(NSInteger index) { [weakSelf switchTab:index]; };
     [self.view addSubview:tab];
 
@@ -475,7 +476,7 @@ static UIWindowScene *pm_active_scene(void) {
 
 - (void)sliderRow:(NSString *)title value:(CGFloat)value min:(CGFloat)mn max:(CGFloat)mx action:(SEL)action {
     CGFloat w = self.view.bounds.size.width - 28;
-    PMCardView *card = [[PCardView alloc] initWithFrame:CGRectMake(14, _y, w, 78)];
+    PMCardView *card = [[PMCardView alloc] initWithFrame:CGRectMake(14, _y, w, 78)];
     [_scroll addSubview:card];
 
     UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(16, 8, w - 110, 20)];
@@ -506,7 +507,7 @@ static UIWindowScene *pm_active_scene(void) {
 
 - (void)fieldRow:(NSString *)title key:(NSString *)key placeholder:(NSString *)placeholder {
     CGFloat w = self.view.bounds.size.width - 28;
-    PMCardView *card = [[PCardView alloc] initWithFrame:CGRectMake(14, _y, w, 48)];
+    PMCardView *card = [[PMCardView alloc] initWithFrame:CGRectMake(14, _y, w, 48)];
     [_scroll addSubview:card];
 
     UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(16, 14, 96, 20)];
