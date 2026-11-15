@@ -193,6 +193,29 @@ int PMUnityCryptid(void) {
     return b ? pm_macho_cryptid(b) : -2;
 }
 
+// 读取 LC_UUID，便于确认基础包版本（4.13 = 964f6391cd6c33788f84dd0aae540677）
+static void pm_macho_uuid(void *base, char *out, size_t cap) {
+    if (cap) out[0] = 0;
+    uint32_t *p = (uint32_t *)base;
+    if (!p || p[0] != 0xFEEDFACF || cap < 33) return;
+    uint32_t ncmds = p[4];
+    uintptr_t off = 32;
+    for (uint32_t i = 0; i < ncmds; i++) {
+        uint32_t cmd = *(uint32_t *)((char *)base + off);
+        uint32_t cmdsize = *(uint32_t *)((char *)base + off + 4);
+        if (cmdsize < 8) break;
+        if (cmd == 0x1B) {
+            const unsigned char *u = (const unsigned char *)base + off + 8;
+            snprintf(out, cap,
+                     "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                     u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+                     u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+            return;
+        }
+        off += cmdsize;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 极简 arm64 inline hook（入口 16 字节 + trampoline）
 // ---------------------------------------------------------------------------
@@ -288,6 +311,7 @@ static const char *(*il2cpp_class_get_name)(Il2CppClass *);
 static FieldInfo *(*il2cpp_class_get_field_from_name)(Il2CppClass *, const char *);
 static void (*il2cpp_field_static_set_value)(FieldInfo *, void *);
 static void (*il2cpp_field_static_get_value)(FieldInfo *, void *);
+static Il2CppDomain *(*il2cpp_thread_attach)(Il2CppDomain *);
 
 static MethodInfo *gSetResultMethod = NULL;
 
@@ -309,16 +333,20 @@ static bool pm_resolve_il2cpp(void) {
     RESOLVE(il2cpp_class_get_field_from_name, "il2cpp_class_get_field_from_name");
     RESOLVE(il2cpp_field_static_set_value, "il2cpp_field_static_set_value");
     RESOLVE(il2cpp_field_static_get_value, "il2cpp_field_static_get_value");
+    RESOLVE(il2cpp_thread_attach, "il2cpp_thread_attach");
 #undef RESOLVE
     PMIl2CppReady = true;
     return true;
 }
 
 static Il2CppClass *pm_find_class(const char *name) {
+    if (!il2cpp_domain_get) return NULL;
     Il2CppDomain *domain = il2cpp_domain_get();
     if (!domain) return NULL;
+    if (il2cpp_thread_attach) il2cpp_thread_attach(domain);   // 非 Unity 线程必须 attach
     size_t count = 0;
     const Il2CppAssembly **asms = il2cpp_domain_get_assemblies(domain, &count);
+    if (!asms || count == 0 || count > 4096) return NULL;
     for (size_t i = 0; i < count; i++) {
         Il2CppImage *img = il2cpp_assembly_get_image(asms[i]);
         if (!img) continue;
@@ -556,9 +584,16 @@ void PMApplySettingsNow(void) { pm_apply_static_settings(); }
 void PMInstallHooks(void) {
     if (PMHookReady) return;
     if (!PMUnityBase()) return;
-    bool api = pm_resolve_il2cpp() && pm_prepare_judge_api();
-
     void *base = (void *)gUnityBase;
+    char uuid[40];
+    pm_macho_uuid(base, uuid, sizeof(uuid));
+    PMLog(@"开始安装 hook: base=%p cryptid=%d uuid=%@", base, PMUnityCryptid(),
+          [NSString stringWithUTF8String:uuid]);
+
+    bool api = pm_resolve_il2cpp();
+    PMLog(@"il2cpp 符号解析: %d", api);
+    if (api) pm_prepare_judge_api();
+    PMLog(@"JudgeSlot.SetResult 就绪: %d", gSetResultMethod != NULL);
 
     orig_UpdateTime = (void (*)(void *))pm_install_hook((void *)((char *)base + kRVA_JudgeSystem_UpdateTime),
                                                         (void *)pm_UpdateTime_hook);

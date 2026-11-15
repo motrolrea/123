@@ -30,7 +30,10 @@ static void PMBootstrap(void) {
         for (int i = 0; i < 90; i++) {
             @autoreleasepool {
                 if (PMUnityBase()) {
-                    PMInstallHooks();
+                    // il2cpp 的 class/domain API 必须在 Unity 主线程调用
+                    dispatch_sync(dispatch_get_main_queue(), ^{
+                        PMInstallHooks();
+                    });
                     if (PMHookReady) break;
                 }
             }
