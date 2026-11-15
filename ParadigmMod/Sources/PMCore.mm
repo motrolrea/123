@@ -41,6 +41,18 @@ bool PMUnlockCollection = false;
 bool PMBlockUpload = false;
 float PMSpeed = 1.0f;
 
+bool PMProfileEnabled = false;
+NSMutableDictionary<NSString *, NSString *> *PMProfileText = nil;
+
+bool PMBallVisible = true;
+float PMBallAlpha = 0.85f;
+
+NSString *PMProfileValue(NSString *key) {
+    NSString *v = PMProfileText[key];
+    if (!v.length) return nil;
+    return v;
+}
+
 volatile int PMLastSlotCount = -1;
 volatile int PMAutoJudged = 0;
 volatile bool PMHookReady = false;
@@ -58,6 +70,40 @@ static const uintptr_t kRVA_Store_IsPurchasedEnum    = 0x01364574;
 static const uintptr_t kRVA_PlayerHelper_IsRelic      = 0x0126263C;
 static const uintptr_t kRVA_PlayerHelper_IsCharacter  = 0x012627C8;
 static const uintptr_t kRVA_Challenge_IsUnlocked      = 0x0110FD9C;
+static const uintptr_t kRVA_Achv_IsUnlockedEnum       = 0x0106BBF0;
+static const uintptr_t kRVA_Achv_IsUnlockedStruct     = 0x0106BA48;
+static const uintptr_t kRVA_Collection_RefreshData    = 0x01129D1C;
+static const uintptr_t kRVA_Collection_RefreshDiff    = 0x0112AEDC;
+static const uintptr_t kRVA_Collection_RefreshGrade   = 0x0112C938;
+static const uintptr_t kRVA_PlayerInfo_UpdateOther    = 0x0116467C;
+static const uintptr_t kRVA_PlayerInfo_UpdateRating   = 0x01163FC4;
+
+// CollectionManager 文本字段偏移（4.13）
+static const size_t kOff_CM_Id            = 0x20;
+static const size_t kOff_CM_TotalPlayTime = 0x28;
+static const size_t kOff_CM_TotalScore    = 0x30;
+static const size_t kOff_CM_Story         = 0xC0;
+static const size_t kOff_CM_Track         = 0xC8;
+static const size_t kOff_CM_PlayCount     = 0xD0;
+static const size_t kOff_CM_NoteDecrypted = 0xD8;
+static const size_t kOff_CM_Chart         = 0xE0;
+static const size_t kOff_CM_Character     = 0xE8;
+static const size_t kOff_CM_Frame         = 0xF0;
+static const size_t kOff_CM_Title         = 0xF8;
+static const size_t kOff_CM_TitleScreen   = 0x100;
+static const size_t kOff_CM_AllDecrypted  = 0x108;
+static const size_t kOff_CM_FullCombo     = 0x110;
+static const size_t kOff_CM_Clear         = 0x118;
+static const size_t kOff_CM_Infinity      = 0x120;
+static const size_t kOff_CM_AAA           = 0x128;
+static const size_t kOff_CM_AA            = 0x130;
+static const size_t kOff_CM_Rating        = 0x140;
+static const size_t kOff_CM_Skin          = 0x170;
+
+// PlayerInfoManager 文本字段偏移
+static const size_t kOff_PI_Level      = 0x30;
+static const size_t kOff_PI_Rating     = 0x40;
+static const size_t kOff_PI_RatingSmall = 0x48;
 
 // JudgeSystem / JudgeSlot / List 字段偏移
 static const size_t kOff_JS_Slots = 0x10;
@@ -300,6 +346,7 @@ typedef struct Il2CppAssembly Il2CppAssembly;
 typedef struct Il2CppImage Il2CppImage;
 typedef struct Il2CppClass Il2CppClass;
 typedef struct Il2CppObject Il2CppObject;
+typedef struct Il2CppString Il2CppString;
 typedef struct Il2CppException Il2CppException;
 typedef struct FieldInfo FieldInfo;
 typedef struct MethodInfo MethodInfo;
@@ -316,6 +363,7 @@ static FieldInfo *(*il2cpp_class_get_field_from_name)(Il2CppClass *, const char 
 static void (*il2cpp_field_static_set_value)(FieldInfo *, void *);
 static void (*il2cpp_field_static_get_value)(FieldInfo *, void *);
 static Il2CppDomain *(*il2cpp_thread_attach)(Il2CppDomain *);
+static Il2CppString *(*il2cpp_string_new)(const char *);
 
 static MethodInfo *gSetResultMethod = NULL;
 
@@ -338,6 +386,7 @@ static bool pm_resolve_il2cpp(void) {
     RESOLVE(il2cpp_field_static_set_value, "il2cpp_field_static_set_value");
     RESOLVE(il2cpp_field_static_get_value, "il2cpp_field_static_get_value");
     RESOLVE(il2cpp_thread_attach, "il2cpp_thread_attach");
+    RESOLVE(il2cpp_string_new, "il2cpp_string_new");
 #undef RESOLVE
     PMIl2CppReady = true;
     return true;
@@ -558,12 +607,128 @@ static bool pm_IsChallengeUnlocked_hook(void *arg, void *method) {
 }
 
 // ---------------------------------------------------------------------------
+// 称号 / 背景（EAchievement）本地解锁
+// ---------------------------------------------------------------------------
+static bool (*orig_IsAchvEnum)(int achv, void *method) = NULL;
+static bool (*orig_IsAchvStruct)(uint64_t achv, void *track) = NULL;
+
+static bool pm_IsAchvEnum_hook(int achv, void *method) {
+    if (__atomic_load_n(&PMUnlockCollection, __ATOMIC_RELAXED)) return true;
+    return orig_IsAchvEnum ? orig_IsAchvEnum(achv, method) : false;
+}
+
+static bool pm_IsAchvStruct_hook(uint64_t achv, void *track) {
+    if (__atomic_load_n(&PMUnlockCollection, __ATOMIC_RELAXED)) return true;
+    return orig_IsAchvStruct ? orig_IsAchvStruct(achv, track) : false;
+}
+
+// ---------------------------------------------------------------------------
+// 个人资料：只改本地显示（不写存档、不上传）
+// ---------------------------------------------------------------------------
+static void pm_set_component_text(void *comp, NSString *value) {
+    if (!comp || !value.length) return;
+    if (!il2cpp_object_get_class || !il2cpp_class_get_method_from_name ||
+        !il2cpp_runtime_invoke || !il2cpp_string_new) return;
+    Il2CppClass *k = il2cpp_object_get_class((Il2CppObject *)comp);
+    if (!k) return;
+    const MethodInfo *m = il2cpp_class_get_method_from_name(k, "set_text", 1);
+    if (!m) m = il2cpp_class_get_method_from_name(k, "SetText", 1);
+    if (!m) return;
+    Il2CppString *s = il2cpp_string_new(value.UTF8String);
+    if (!s) return;
+    void *args[1] = {s};
+    Il2CppException *exc = NULL;
+    il2cpp_runtime_invoke(m, comp, args, &exc);
+}
+
+static void pm_set_text_at(void *self, size_t off, NSString *key) {
+    if (!self) return;
+    NSString *v = PMProfileValue(key);
+    if (!v) return;
+    void *comp = *(void **)((char *)self + off);
+    pm_set_component_text(comp, v);
+}
+
+static void pm_apply_collection_overrides(void *self) {
+    if (!PMProfileEnabled || !self) return;
+    pm_set_text_at(self, kOff_CM_Id, @"id");
+    pm_set_text_at(self, kOff_CM_TotalPlayTime, @"playtime");
+    pm_set_text_at(self, kOff_CM_TotalScore, @"totalscore");
+    pm_set_text_at(self, kOff_CM_Story, @"stories");
+    pm_set_text_at(self, kOff_CM_Track, @"tracks");
+    pm_set_text_at(self, kOff_CM_PlayCount, @"playcount");
+    pm_set_text_at(self, kOff_CM_NoteDecrypted, @"note");
+    pm_set_text_at(self, kOff_CM_Chart, @"charts");
+    pm_set_text_at(self, kOff_CM_Character, @"characters");
+    pm_set_text_at(self, kOff_CM_Frame, @"backgrounds");
+    pm_set_text_at(self, kOff_CM_Title, @"titles");
+    pm_set_text_at(self, kOff_CM_TitleScreen, @"titlescreens");
+    pm_set_text_at(self, kOff_CM_AllDecrypted, @"alldecrypted");
+    pm_set_text_at(self, kOff_CM_FullCombo, @"fullcombo");
+    pm_set_text_at(self, kOff_CM_Clear, @"clear");
+    pm_set_text_at(self, kOff_CM_Infinity, @"infinity");
+    pm_set_text_at(self, kOff_CM_AAA, @"aaa");
+    pm_set_text_at(self, kOff_CM_AA, @"aa");
+    pm_set_text_at(self, kOff_CM_Rating, @"rating");
+    pm_set_text_at(self, kOff_CM_Skin, @"skins");
+}
+
+static void pm_apply_playerinfo_overrides(void *self) {
+    if (!PMProfileEnabled || !self) return;
+    pm_set_text_at(self, kOff_PI_Level, @"level");
+    pm_set_text_at(self, kOff_PI_Rating, @"rating");
+    pm_set_text_at(self, kOff_PI_RatingSmall, @"rating");
+}
+
+static void (*orig_CM_RefreshData)(void *) = NULL;
+static void (*orig_CM_RefreshDiff)(void *) = NULL;
+static void (*orig_CM_RefreshGrade)(void *, void *) = NULL;
+static void (*orig_PI_UpdateOther)(void *) = NULL;
+static void (*orig_PI_UpdateRating)(void *) = NULL;
+
+static void pm_CM_RefreshData_hook(void *self) {
+    if (orig_CM_RefreshData) orig_CM_RefreshData(self);
+    pm_apply_collection_overrides(self);
+}
+
+static void pm_CM_RefreshDiff_hook(void *self) {
+    if (orig_CM_RefreshDiff) orig_CM_RefreshDiff(self);
+    pm_apply_collection_overrides(self);
+}
+
+static void pm_CM_RefreshGrade_hook(void *self, void *arr) {
+    if (PMProfileEnabled && arr) {
+        NSString *v = PMProfileValue(@"grades");
+        if (v.length) {
+            int32_t n = v.intValue;
+            int len = *(int *)((char *)arr + 0x18);
+            int32_t *items = (int32_t *)((char *)arr + 0x20);
+            if (len >= 0 && len <= 16) {
+                for (int i = 0; i < len; i++) items[i] = n;
+            }
+        }
+    }
+    if (orig_CM_RefreshGrade) orig_CM_RefreshGrade(self, arr);
+}
+
+static void pm_PI_UpdateOther_hook(void *self) {
+    if (orig_PI_UpdateOther) orig_PI_UpdateOther(self);
+    pm_apply_playerinfo_overrides(self);
+}
+
+static void pm_PI_UpdateRating_hook(void *self) {
+    if (orig_PI_UpdateRating) orig_PI_UpdateRating(self);
+    pm_apply_playerinfo_overrides(self);
+}
+
+// ---------------------------------------------------------------------------
 // 周期任务：全解锁 / 变速
 // ---------------------------------------------------------------------------
 static float gOrigHiSpeed = 1.0f;
 static bool gHiSpeedCaptured = false;
 static bool gHiSpeedOverridden = false;
 static bool gUnlockAllWritten = false;
+static bool gCollectionUnlockWritten = false;
 
 static void pm_apply_static_settings(void) {
     if (!PMIl2CppReady) return;
@@ -574,6 +739,16 @@ static void pm_apply_static_settings(void) {
             gUnlockAllWritten = unlock;
             PMUnlockAllApplied = unlock;
         }
+    }
+
+    // 皮肤 / 故事 / 词典（称号、背景等）本地全解锁
+    bool coll = __atomic_load_n(&PMUnlockCollection, __ATOMIC_RELAXED);
+    if (coll != gCollectionUnlockWritten) {
+        bool ok1 = pm_set_static_bool("SkinUnlockStorage", "UnlockAll", coll);
+        bool ok2 = pm_set_static_bool("StoryUnlockStorage", "UnlockAll", coll);
+        bool ok3 = pm_set_static_bool("DictStorage", "UnlockAll", coll);
+        PMLog(@"内容解锁: skin=%d story=%d dict=%d -> %d", ok1, ok2, ok3, coll);
+        if (ok1 || ok2 || ok3) gCollectionUnlockWritten = coll;
     }
 
     float speed = PMSpeed;
@@ -640,11 +815,30 @@ void PMInstallHooks(void) {
     orig_IsChallengeUnlocked = (bool (*)(void *, void *))pm_install_hook(
         (void *)((char *)base + kRVA_Challenge_IsUnlocked), (void *)pm_IsChallengeUnlocked_hook);
 
+    orig_IsAchvEnum = (bool (*)(int, void *))pm_install_hook(
+        (void *)((char *)base + kRVA_Achv_IsUnlockedEnum), (void *)pm_IsAchvEnum_hook);
+    orig_IsAchvStruct = (bool (*)(uint64_t, void *))pm_install_hook(
+        (void *)((char *)base + kRVA_Achv_IsUnlockedStruct), (void *)pm_IsAchvStruct_hook);
+
+    orig_CM_RefreshData = (void (*)(void *))pm_install_hook(
+        (void *)((char *)base + kRVA_Collection_RefreshData), (void *)pm_CM_RefreshData_hook);
+    orig_CM_RefreshDiff = (void (*)(void *))pm_install_hook(
+        (void *)((char *)base + kRVA_Collection_RefreshDiff), (void *)pm_CM_RefreshDiff_hook);
+    orig_CM_RefreshGrade = (void (*)(void *, void *))pm_install_hook(
+        (void *)((char *)base + kRVA_Collection_RefreshGrade), (void *)pm_CM_RefreshGrade_hook);
+    orig_PI_UpdateOther = (void (*)(void *))pm_install_hook(
+        (void *)((char *)base + kRVA_PlayerInfo_UpdateOther), (void *)pm_PI_UpdateOther_hook);
+    orig_PI_UpdateRating = (void (*)(void *))pm_install_hook(
+        (void *)((char *)base + kRVA_PlayerInfo_UpdateRating), (void *)pm_PI_UpdateRating_hook);
+
     PMHookReady = (orig_UpdateTime != NULL);
-    PMLog(@"hooks: updateTime=%d setResult=%d addHP=%d run=%d purchased=%d/%d collection=%d/%d/%d cryptid=%d",
+    PMLog(@"hooks: updateTime=%d setResult=%d addHP=%d run=%d purchased=%d/%d collection=%d/%d/%d achv=%d/%d profile=%d/%d/%d/%d/%d cryptid=%d",
           orig_UpdateTime != NULL, orig_SetResult != NULL, orig_AddHP != NULL,
           orig_Run != NULL, orig_IsPurchasedStr != NULL, orig_IsPurchasedEnum != NULL,
           orig_IsRelicUnlocked != NULL, orig_IsCharacterUnlocked != NULL, orig_IsChallengeUnlocked != NULL,
+          orig_IsAchvEnum != NULL, orig_IsAchvStruct != NULL,
+          orig_CM_RefreshData != NULL, orig_CM_RefreshDiff != NULL, orig_CM_RefreshGrade != NULL,
+          orig_PI_UpdateOther != NULL, orig_PI_UpdateRating != NULL,
           PMUnityCryptid());
     if (PMUnityCryptid() == 1) {
         PMLog(@"⚠️ UnityFramework cryptid=1，应用未砸壳：内存补丁会被系统拦截，hook 很可能全部失效");

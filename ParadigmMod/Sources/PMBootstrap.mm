@@ -23,6 +23,21 @@ static void PMBootstrap(void) {
     PMUnlockCollection = [d boolForKey:@"pm.coll"];
     PMBlockUpload = [d boolForKey:@"pm.block"];
     PMSpeed       = [d objectForKey:@"pm.speed"]  ? [d floatForKey:@"pm.speed"] : 1.0f;
+    PMBallVisible = [d objectForKey:@"pm.ball.show"] ? [d boolForKey:@"pm.ball.show"] : YES;
+    PMBallAlpha   = [d objectForKey:@"pm.ball.alpha"] ? [d floatForKey:@"pm.ball.alpha"] : 0.85f;
+    PMProfileEnabled = [d boolForKey:@"pm.profile.on"];
+
+    // 个人资料本地覆盖值
+    NSMutableDictionary<NSString *, NSString *> *profile = [NSMutableDictionary dictionary];
+    NSArray<NSString *> *keys = @[@"id", @"level", @"rating", @"tracks", @"charts", @"characters",
+                                  @"skins", @"stories", @"titles", @"backgrounds", @"titlescreens",
+                                  @"playcount", @"playtime", @"totalscore", @"note", @"grades",
+                                  @"alldecrypted", @"fullcombo", @"clear", @"infinity", @"aaa", @"aa"];
+    for (NSString *k in keys) {
+        NSString *v = [d stringForKey:[@"pm.profile." stringByAppendingString:k]];
+        if (v.length) profile[k] = v;
+    }
+    PMProfileText = profile;
 
     PMLog(@"dylib 已加载（4.13 基线），autoplay=%d ap=%d hp=%d unlock=%d paid=%d block=%d speed=%.2f",
           PMAutoPlay, PMAllPerfect, PMLockHP, PMUnlockAll, PMPaidUnlock, PMBlockUpload, PMSpeed);

@@ -16,6 +16,16 @@ extern bool PMUnlockCollection;
 extern bool PMBlockUpload;
 extern float PMSpeed;
 
+// 个人资料：仅本地显示覆盖（不写存档、不上传）
+extern bool PMProfileEnabled;
+extern NSMutableDictionary<NSString *, NSString *> *PMProfileText;
+// 取覆盖值，未配置返回 nil
+NSString *PMProfileValue(NSString *key);
+
+// 悬浮球
+extern bool PMBallVisible;
+extern float PMBallAlpha;
+
 // 诊断
 extern volatile int PMLastSlotCount;
 extern volatile int PMAutoJudged;
@@ -35,6 +45,7 @@ void PMApplySettingsNow(void);
 
 void PMShowOverlay(void);
 void PMUpdateOverlay(void);
+void PMUpdateBall(void);
 
 #ifdef __cplusplus
 }
