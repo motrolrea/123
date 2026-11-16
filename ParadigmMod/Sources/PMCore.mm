@@ -473,6 +473,10 @@ static const char *(*il2cpp_class_get_namespace)(Il2CppClass *);
 static Il2CppObject *(*il2cpp_array_new)(Il2CppClass *, size_t);
 static Il2CppObject *(*il2cpp_object_new)(Il2CppClass *);
 static Il2CppClass *(*il2cpp_array_class_get)(Il2CppClass *, uint32_t);
+static const MethodInfo *(*il2cpp_class_get_methods)(Il2CppClass *, void **);
+static const char *(*il2cpp_method_get_name)(const MethodInfo *);
+static int (*il2cpp_method_get_param_count)(const MethodInfo *);
+static bool (*il2cpp_method_is_generic)(const MethodInfo *);
 
 static MethodInfo *gSetResultMethod = NULL;
 
@@ -506,6 +510,10 @@ static bool pm_resolve_il2cpp(void) {
     il2cpp_array_new = (__typeof__(il2cpp_array_new))dlsym(h, "il2cpp_array_new");
     il2cpp_object_new = (__typeof__(il2cpp_object_new))dlsym(h, "il2cpp_object_new");
     il2cpp_array_class_get = (__typeof__(il2cpp_array_class_get))dlsym(h, "il2cpp_array_class_get");
+    il2cpp_class_get_methods = (__typeof__(il2cpp_class_get_methods))dlsym(h, "il2cpp_class_get_methods");
+    il2cpp_method_get_name = (__typeof__(il2cpp_method_get_name))dlsym(h, "il2cpp_method_get_name");
+    il2cpp_method_get_param_count = (__typeof__(il2cpp_method_get_param_count))dlsym(h, "il2cpp_method_get_param_count");
+    il2cpp_method_is_generic = (__typeof__(il2cpp_method_is_generic))dlsym(h, "il2cpp_method_is_generic");
 #undef RESOLVE
     PMIl2CppReady = true;
     return true;
@@ -1108,7 +1116,7 @@ static void pm_refresh_object(Il2CppClass *k, void **slot, void **handle) {
     if (!t) return;
     void *typeObj = il2cpp_type_get_object(t);
     if (!typeObj) return;
-    uint8_t includeInactive = 0;
+    uint8_t includeInactive = 1;   // 有些不活跃的 UI（主菜单资料栏）也要能找到
     void *args[2] = {typeObj, &includeInactive};
     Il2CppException *exc = NULL;
     Il2CppObject *o = il2cpp_runtime_invoke(gFindTypeMethod, NULL, args, &exc);
@@ -1443,6 +1451,23 @@ static int pm_child_count(void *tr) {
     return boxed ? *(int *)((char *)boxed + 0x10) : -1;
 }
 
+// il2cpp_class_get_method_from_name 会返回泛型版本（如 Instantiate<T>），
+// 泛型定义无法直接用 runtime_invoke 调，这里按名字/参数个数挑非泛型的那个。
+static const MethodInfo *pm_method_nongeneric(Il2CppClass *k, const char *name, int argc) {
+    if (!k || !il2cpp_class_get_methods) return NULL;
+    void *iter = NULL;
+    const MethodInfo *m = NULL;
+    while ((m = il2cpp_class_get_methods(k, &iter)) != NULL) {
+        const char *n = il2cpp_method_get_name ? il2cpp_method_get_name(m) : NULL;
+        if (!n || strcmp(n, name) != 0) continue;
+        int pc = il2cpp_method_get_param_count ? il2cpp_method_get_param_count(m) : -1;
+        if (pc != argc) continue;
+        if (il2cpp_method_is_generic && il2cpp_method_is_generic(m)) continue;
+        return m;
+    }
+    return NULL;
+}
+
 static void *pm_get_child(void *tr, int idx) {
     if (!pm_ptr_ok(tr)) return NULL;
     int32_t i = idx;
@@ -1537,7 +1562,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
     }
     void *tabParent = pm_call_obj(tabProto, "get_parent", 0, NULL);
     void *viewParent = pm_call_obj(viewProto, "get_parent", 0, NULL);
-    const MethodInfo *mInst = il2cpp_class_get_method_from_name(gFindTypesHost, "Instantiate", 2);
+    const MethodInfo *mInst = pm_method_nongeneric(gFindTypesHost, "Instantiate", 2);
     if (!pm_ptr_ok(tabParent) || !pm_ptr_ok(viewParent) || !mInst) {
         PMLog(@"Mod页: 容器异常 tabParent=%p viewParent=%p inst=%p", tabParent, viewParent, mInst);
         return NO;
@@ -1557,7 +1582,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
         void *ia[2] = {protoGO, tabParent};
         Il2CppException *ex = NULL;
         il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
-        if (ex) { PMLog(@"Mod页: 克隆 Tab 按钮失败"); break; }
+        if (ex) { PMLog(@"Mod页: 克隆 Tab 按钮失败 exc=%p", ex); break; }
         tabChildren = pm_child_count(tabParent);
     }
 
@@ -1568,7 +1593,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
         void *ia[2] = {protoGO, viewParent};
         Il2CppException *ex = NULL;
         il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
-        if (ex) { PMLog(@"Mod页: 克隆设置页失败"); break; }
+        if (ex) { PMLog(@"Mod页: 克隆设置页失败 exc=%p", ex); break; }
         viewChildren = pm_child_count(viewParent);
     }
     if (viewChildren <= pn) {
@@ -1763,6 +1788,30 @@ static void pm_runtime_tick(void) {
         pm_refresh_object(gSettingsClass, &gSettingsObj, &gSettingsHandle);
 
         pm_sync_prefs();
+
+        static BOOL piLogged = NO;
+        if (gPI_Obj && !piLogged) {
+            piLogged = YES;
+            PMLog(@"PlayerInfoManager 实例 = %p", gPI_Obj);
+        }
+        // 诊断：游戏角色页自己能列出多少个已解锁角色
+        static BOOL charProbed = NO;
+        if (!charProbed && gFindTypeMethod && il2cpp_class_get_type && il2cpp_type_get_object) {
+            Il2CppClass *ct = pm_find_class("CharacterTabManager");
+            if (ct) {
+                void *tObj = il2cpp_type_get_object(il2cpp_class_get_type(ct));
+                uint8_t inc = 1;
+                void *cargs[2] = {tObj, &inc};
+                Il2CppObject *inst = tObj ? il2cpp_runtime_invoke(gFindTypeMethod, NULL, cargs, NULL) : NULL;
+                if (inst) {
+                    const MethodInfo *mGet = il2cpp_class_get_method_from_name(ct, "GetUnlockedCharacters", 0);
+                    Il2CppObject *list = mGet ? il2cpp_runtime_invoke(mGet, inst, NULL, NULL) : NULL;
+                    PMLog(@"角色页诊断: 实例=%p 已解锁角色=%d", inst,
+                          list ? *(int *)((char *)list + 0x18) : -1);
+                    charProbed = YES;
+                }
+            }
+        }
 
         if (gSettingsObj) {
             static CFTimeInterval lastAttempt = 0;
