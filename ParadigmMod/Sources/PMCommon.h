@@ -10,6 +10,7 @@ extern "C" {
 extern bool PMAutoPlay;
 extern bool PMAllPerfect;
 extern bool PMLockHP;
+extern bool PMShowLifeBar;
 extern bool PMUnlockAll;
 extern bool PMPaidUnlock;
 extern bool PMUnlockCollection;

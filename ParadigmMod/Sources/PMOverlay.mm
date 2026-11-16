@@ -25,6 +25,7 @@ typedef NS_ENUM(NSInteger, PMRowTag) {
     PMRowUnlockBg,
     PMRowUnlockChallenge,
     PMRowAutoHide,
+    PMRowLifeBar,
 };
 
 @interface PMSettingsController : UIViewController
@@ -318,20 +319,13 @@ static UIWindow *gEntryWindow = nil;
     self.alpha = highlighted ? 0.6 : 1.0;
 }
 - (void)drawRect:(CGRect)rect {
-    CGRect r = CGRectInset(self.bounds, 2, 4);
-    UIBezierPath *p = PMSlant(r, 0.30);
-    [[UIColor colorWithWhite:0.04 alpha:0.78] setFill];
-    [p fill];
-    [[UIColor colorWithRed:0.35 green:0.75 blue:1.0 alpha:0.9] setStroke];
-    p.lineWidth = 1.0;
-    [p stroke];
-
     NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new];
-    ps.alignment = NSTextAlignmentCenter;
-    NSDictionary *attrs = @{NSFontAttributeName:[UIFont italicSystemFontOfSize:15],
-                            NSForegroundColorAttributeName:UIColor.whiteColor,
+    ps.alignment = NSTextAlignmentLeft;
+    NSDictionary *attrs = @{NSFontAttributeName:[UIFont boldSystemFontOfSize:16],
+                            NSForegroundColorAttributeName:[UIColor colorWithWhite:1 alpha:0.92],
                             NSParagraphStyleAttributeName:ps};
-    [@"MOD" drawInRect:CGRectInset(r, 0, r.size.height * 0.28) withAttributes:attrs];
+    [@"Mod设置" drawInRect:CGRectMake(6, (self.bounds.size.height - 22) / 2, self.bounds.size.width - 12, 22)
+            withAttributes:attrs];
 }
 @end
 
@@ -344,7 +338,12 @@ void PMSetModEntryVisible(bool visible) {
         if (!gEntryWindow) {
             UIWindowScene *scene = pm_active_scene();
             CGRect sb = scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
-            CGRect f = CGRectMake(30, sb.size.height - 70, 112, 42);
+            // 贴在官方设置左侧分类栏「其他设置」下方
+            CGFloat w = sb.size.width * 0.30;
+            CGFloat h = 44;
+            CGFloat x = sb.size.width * 0.115;
+            CGFloat y = sb.size.height * 0.665;
+            CGRect f = CGRectMake(x, y, w, h);
             gEntryWindow = scene ? [[UIWindow alloc] initWithWindowScene:scene]
                                  : [[UIWindow alloc] initWithFrame:f];
             gEntryWindow.frame = f;
@@ -465,6 +464,8 @@ void PMSetModEntryVisible(bool visible) {
     [self toggleRow:@"全 Perfect" detail:@"Good / Miss 强制按 Perfect 结算"
                 tag:PMRowAllPerfect on:PMAllPerfect];
     [self toggleRow:@"锁血" detail:@"Miss 不掉血" tag:PMRowLockHP on:PMLockHP];
+    [self toggleRow:@"显示血条（保持满血）" detail:@"关掉则完全不显示两侧血条"
+                tag:PMRowLifeBar on:PMShowLifeBar];
 }
 
 // ------------------------------ 解锁 ------------------------------
@@ -720,6 +721,9 @@ void PMSetModEntryVisible(bool visible) {
             PMAutoHideInGame = on;
             PMUpdateBall();
             break;
+        case PMRowLifeBar:
+            PMShowLifeBar = on;
+            break;
         case PMRowBallShow:
             PMBallVisible = on;
             PMUpdateBall();
@@ -797,6 +801,7 @@ void PMSetModEntryVisible(bool visible) {
     [d setBool:PMAutoPlay forKey:@"pm.auto"];
     [d setBool:PMAllPerfect forKey:@"pm.ap"];
     [d setBool:PMLockHP forKey:@"pm.hp"];
+    [d setBool:PMShowLifeBar forKey:@"pm.hp.bar"];
     [d setBool:PMUnlockAll forKey:@"pm.unlock"];
     [d setBool:PMPaidUnlock forKey:@"pm.paid"];
     [d setBool:PMUnlockCollection forKey:@"pm.coll"];

@@ -19,6 +19,7 @@ static void PMBootstrap(void) {
     PMAutoPlay    = [d objectForKey:@"pm.auto"]   ? [d boolForKey:@"pm.auto"]   : YES;
     PMAllPerfect  = [d boolForKey:@"pm.ap"];
     PMLockHP      = [d boolForKey:@"pm.hp"];
+    PMShowLifeBar = [d objectForKey:@"pm.hp.bar"] ? [d boolForKey:@"pm.hp.bar"] : YES;
     PMUnlockAll   = [d boolForKey:@"pm.unlock"];
     PMPaidUnlock  = [d boolForKey:@"pm.paid"];
     PMUnlockCollection = [d boolForKey:@"pm.coll"];

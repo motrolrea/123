@@ -42,6 +42,7 @@
 bool PMAutoPlay = true;
 bool PMAllPerfect = false;
 bool PMLockHP = false;
+bool PMShowLifeBar = true;
 bool PMUnlockAll = false;
 bool PMPaidUnlock = false;
 bool PMUnlockCollection = false;
@@ -1048,15 +1049,20 @@ static void pm_runtime_tick(void) {
     }
     PMLastGameplayTick = now;
 
-    // 锁血第一步：把 LifeType 设成 None(6)，AddHP 里直接不扣血
+    // 锁血：可选保留血条（一直满血）或彻底隐藏血条
     if (PMLockHP) {
         if (js != gLifeJs) {
             if (gLifeTypeSaved) pm_set_lifetype(gSavedLifeType);
             gSavedLifeType = pm_get_lifetype();
             gLifeTypeSaved = true;
             gLifeJs = js;
-            pm_set_lifetype(6);
-            PMLog(@"锁血: LifeType %d -> 6(None)", gSavedLifeType);
+            if (!PMShowLifeBar) pm_set_lifetype(6);
+            PMLog(@"锁血: 原 LifeType=%d, 显示血条=%d", gSavedLifeType, PMShowLifeBar);
+        }
+        if (PMShowLifeBar) {
+            if (gSavedLifeType >= 0 && gSavedLifeType <= 5 && pm_get_lifetype() != gSavedLifeType) {
+                pm_set_lifetype(gSavedLifeType);
+            }
         } else if (pm_get_lifetype() != 6) {
             pm_set_lifetype(6);
         }
