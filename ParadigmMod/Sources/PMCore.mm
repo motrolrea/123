@@ -1026,6 +1026,7 @@ static void *pm_call_obj(void *obj, const char *name, int argc, void **args) {
 
 static void *gModPageGO = NULL;
 static BOOL gEntryInjected = NO;
+static CFTimeInterval gSettingsSeenAt = 0;
 static Il2CppClass *gTabClass = NULL;
 static Il2CppClass *gTitleCellClass = NULL;
 static Il2CppClass *gChoiceCellClass = NULL;
@@ -1037,8 +1038,23 @@ static Il2CppClass *pm_class_any_ns(const char *name, const char *ns) {
     return pm_class_in_namespace(name, ns, NULL, 0);
 }
 
+static Il2CppClass *pm_string_class(void) {
+    static Il2CppClass *k = NULL;
+    if (!k) {
+        Il2CppString *s = il2cpp_string_new("");
+        if (s) k = *(Il2CppClass **)s;
+    }
+    return k;
+}
+
+static Il2CppClass *pm_int_class(void) {
+    static Il2CppClass *k = NULL;
+    if (!k) k = pm_class_any_ns("Int32", "System");
+    return k;
+}
+
 static Il2CppObject *pm_make_string_array(const char **vals, int n) {
-    Il2CppClass *s = pm_class_any_ns("String", "System");
+    Il2CppClass *s = pm_string_class();
     if (!s || !il2cpp_array_new) return NULL;
     Il2CppObject *a = il2cpp_array_new(s, (size_t)n);
     if (!a) return NULL;
@@ -1048,7 +1064,7 @@ static Il2CppObject *pm_make_string_array(const char **vals, int n) {
 }
 
 static Il2CppObject *pm_make_int_array(const int *vals, int n) {
-    Il2CppClass *s = pm_class_any_ns("Int32", "System");
+    Il2CppClass *s = pm_int_class();
     if (!s || !il2cpp_array_new) return NULL;
     Il2CppObject *a = il2cpp_array_new(s, (size_t)n);
     if (!a) return NULL;
@@ -1442,7 +1458,8 @@ static void pm_runtime_tick(void) {
         pm_sync_prefs();
 
         if (gSettingsObj) {
-            if (!gEntryInjected) {
+            if (!gSettingsSeenAt) gSettingsSeenAt = now;
+            if (!gEntryInjected && now - gSettingsSeenAt > 0.5) {   // 等设置面板初始化稳定后再注入
                 gEntryInjected = YES;
                 gEntryVisible = YES;
                 PMSetModEntryVisible(false);
@@ -1453,6 +1470,7 @@ static void pm_runtime_tick(void) {
         } else if (gEntryVisible) {
             gEntryVisible = NO;
             gEntryInjected = NO;
+            gSettingsSeenAt = 0;
             gModPageGO = NULL;   // 设置面板已销毁，页面随之销毁
         }
 
