@@ -1439,7 +1439,7 @@ static void pm_tab_add_cell(void *tab, void *cell) {    if (!tab || !cell) retur
 
 static int pm_child_count(void *tr) {
     if (!pm_ptr_ok(tr)) return -1;
-    Il2CppObject *boxed = pm_call_obj(tr, "get_childCount", 0, NULL);
+    Il2CppObject *boxed = (Il2CppObject *)pm_call_obj(tr, "get_childCount", 0, NULL);
     return boxed ? *(int *)((char *)boxed + 0x10) : -1;
 }
 
