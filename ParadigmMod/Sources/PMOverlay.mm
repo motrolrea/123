@@ -439,12 +439,6 @@ static UIWindowScene *pm_active_scene(void) {
                 tag:PMRowUnlockBg on:PMUnlockBackgrounds];
     [self toggleRow:@"挑战" detail:@"IsChallengeUnlocked 本地放行"
                 tag:PMRowUnlockChallenge on:PMUnlockChallenges];
-    [self toggleRow:@"付费曲包（本地）" detail:@"仅本地把 IsPurchased 判为 true"
-                tag:PMRowPaidUnlock on:PMPaidUnlock];
-
-    [self section:@"网络"];
-    [self toggleRow:@"屏蔽成绩上传" detail:@"拦截 BackendAPI.ScoreUploadCoroutine，本地成绩仍保存"
-                tag:PMRowBlockUpload on:PMBlockUpload];
 }
 
 // ------------------------------ 资料 ------------------------------
@@ -767,12 +761,10 @@ static UIWindowScene *pm_active_scene(void) {
 - (void)refreshStatus {
     if (!gStatusLabel) return;
     gStatusLabel.text = [NSString stringWithFormat:
-        @"hook: %@   il2cpp: %@\nslots: %d   autoplay hits: %d\nunlockAll: %@   upload blocked: %d",
-        PMHookReady ? @"OK" : @"FAILED",
+        @"模式: 轮询（不改代码）   il2cpp: %@\nslots: %d   autoplay hits: %d\nunlockAll: %@",
         PMIl2CppReady ? @"OK" : @"N/A",
         PMLastSlotCount, PMAutoJudged,
-        PMUnlockAllApplied ? @"on" : @"off",
-        PMUploadBlocked];
+        PMUnlockAllApplied ? @"on" : @"off"];
 }
 
 - (void)onShowLog {

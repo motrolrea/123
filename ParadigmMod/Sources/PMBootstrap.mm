@@ -61,32 +61,12 @@ static void PMBootstrap(void) {
         });
     });
 
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        // 等游戏完成启动再装 hook：避免开局阶段就调用到被改写的函数
-        [NSThread sleepForTimeInterval:12.0];
-        PMLog(@"延迟结束，开始安装 hook");
-        for (int i = 0; i < 6; i++) {
-            @autoreleasepool {
-                if (PMUnityBase()) {
-                    // il2cpp 的 class/domain API 必须在 Unity 主线程调用
-                    dispatch_sync(dispatch_get_main_queue(), ^{
-                        PMInstallHooks();
-                    });
-                    if (PMHookReady || PMHookFailed) break;
-                }
-            }
-            [NSThread sleepForTimeInterval:2.0];
-        }
-        PMLog(@"hook 安装结束: ready=%d failed=%d cryptid=%d uuid=%@",
-              PMHookReady, PMHookFailed, PMUnityCryptid(), PMUnityUUIDString());
-
-        // 静态字段（全解锁 / 变速）需要周期性重写
-        dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-        dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, 0), 1500ull * NSEC_PER_MSEC, 200ull * NSEC_PER_MSEC);
-        dispatch_source_set_event_handler(t, ^{
-            PMApplySettingsNow();
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 等 Unity 初始化完成一小会儿再启动轮询（不做任何 inline hook）
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            PMLog(@"启动运行时轮询 cryptid=%d uuid=%@", PMUnityCryptid(), PMUnityUUIDString());
+            PMStartRuntimeFeatures();
         });
-        dispatch_resume(t);
-        gTimer = t;
     });
 }

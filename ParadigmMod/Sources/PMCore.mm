@@ -17,6 +17,7 @@
 
 #import "PMCommon.h"
 #import <objc/runtime.h>
+#import <QuartzCore/QuartzCore.h>
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
@@ -442,6 +443,10 @@ static void (*il2cpp_field_static_set_value)(FieldInfo *, void *);
 static void (*il2cpp_field_static_get_value)(FieldInfo *, void *);
 static Il2CppDomain *(*il2cpp_thread_attach)(Il2CppDomain *);
 static Il2CppString *(*il2cpp_string_new)(const char *);
+static Il2CppType *(*il2cpp_class_get_type)(Il2CppClass *);
+static Il2CppObject *(*il2cpp_type_get_object)(const Il2CppType *);
+static void *(*il2cpp_gchandle_new)(Il2CppObject *, bool);
+static void (*il2cpp_gchandle_free)(void *);
 
 static MethodInfo *gSetResultMethod = NULL;
 
@@ -465,6 +470,10 @@ static bool pm_resolve_il2cpp(void) {
     RESOLVE(il2cpp_field_static_get_value, "il2cpp_field_static_get_value");
     RESOLVE(il2cpp_thread_attach, "il2cpp_thread_attach");
     RESOLVE(il2cpp_string_new, "il2cpp_string_new");
+    il2cpp_class_get_type = (__typeof__(il2cpp_class_get_type))dlsym(h, "il2cpp_class_get_type");
+    il2cpp_type_get_object = (__typeof__(il2cpp_type_get_object))dlsym(h, "il2cpp_type_get_object");
+    il2cpp_gchandle_new = (__typeof__(il2cpp_gchandle_new))dlsym(h, "il2cpp_gchandle_new");
+    il2cpp_gchandle_free = (__typeof__(il2cpp_gchandle_free))dlsym(h, "il2cpp_gchandle_free");
 #undef RESOLVE
     PMIl2CppReady = true;
     return true;
@@ -877,6 +886,180 @@ static void pm_apply_static_settings(void) {
 }
 
 void PMApplySettingsNow(void) { pm_apply_static_settings(); }
+
+// ---------------------------------------------------------------------------
+// 无代码补丁运行时：il2cpp 反射 + CADisplayLink 轮询
+// （这个签名环境下改代码页会被系统直接杀进程，所以完全不做 inline hook）
+// ---------------------------------------------------------------------------
+static Il2CppClass *gWrapClass = NULL;
+static Il2CppClass *gCollectionClass = NULL;
+static Il2CppClass *gPIClass = NULL;
+static Il2CppClass *gFindTypesHost = NULL;
+static const MethodInfo *gFindTypeMethod = NULL;
+static void *gWrapObj = NULL;
+static void *gCollectionObj = NULL;
+static void *gPI_Obj = NULL;
+static void *gWrapHandle = NULL;
+static void *gCollectionHandle = NULL;
+static void *gPI_Handle = NULL;
+static CFTimeInterval gLastFindTime = 0;
+static CFTimeInterval gLastSlowTime = 0;
+static int gLastLifeValue = -1;
+static void *gLastGCObj = NULL;
+
+static Il2CppClass *pm_class_with_static_method(const char *cls, const char *m, int argc) {
+    Il2CppDomain *domain = il2cpp_domain_get();
+    if (!domain) return NULL;
+    if (il2cpp_thread_attach) il2cpp_thread_attach(domain);
+    size_t count = 0;
+    const Il2CppAssembly **asms = il2cpp_domain_get_assemblies(domain, &count);
+    if (!asms || count == 0 || count > 4096) return NULL;
+    for (size_t i = 0; i < count; i++) {
+        Il2CppImage *img = il2cpp_assembly_get_image(asms[i]);
+        if (!img) continue;
+        Il2CppClass *k = il2cpp_class_from_name(img, "", cls);
+        if (!k) continue;
+        if (il2cpp_class_get_method_from_name(k, m, argc)) return k;
+    }
+    return NULL;
+}
+
+// 用 Object.FindObjectOfType 找场景里唯一实例，并用 GCHandle 保活
+static void pm_refresh_object(Il2CppClass *k, void **slot, void **handle) {
+    if (!k || !gFindTypeMethod || !il2cpp_class_get_type || !il2cpp_type_get_object) return;
+    Il2CppType *t = il2cpp_class_get_type(k);
+    if (!t) return;
+    void *typeObj = il2cpp_type_get_object(t);
+    if (!typeObj) return;
+    uint8_t includeInactive = 0;
+    void *args[2] = {typeObj, &includeInactive};
+    Il2CppException *exc = NULL;
+    Il2CppObject *o = il2cpp_runtime_invoke(gFindTypeMethod, NULL, args, &exc);
+    if (!o) { *slot = NULL; return; }
+    if (*handle && il2cpp_gchandle_free) {
+        il2cpp_gchandle_free(*handle);
+        *handle = NULL;
+    }
+    if (il2cpp_gchandle_new) *handle = il2cpp_gchandle_new(o, false);
+    *slot = o;
+}
+
+static void pm_runtime_tick(void) {
+    if (!PMIl2CppReady) return;
+    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+
+    if (now - gLastFindTime > 0.6) {
+        gLastFindTime = now;
+        if (!gWrapClass) {
+            gWrapClass = pm_find_class("JudgeSystemWrap");
+            gCollectionClass = pm_find_class("CollectionManager");
+            gPIClass = pm_find_class("PlayerInfoManager");
+            gFindTypesHost = pm_class_with_static_method("Object", "FindObjectOfType", 2);
+            if (gFindTypesHost) {
+                gFindTypeMethod = il2cpp_class_get_method_from_name(gFindTypesHost, "FindObjectOfType", 2);
+            }
+            PMLog(@"轮询模式: wrap=%p collection=%p playerInfo=%p findType=%p",
+                  gWrapClass, gCollectionClass, gPIClass, gFindTypeMethod);
+        }
+        pm_refresh_object(gWrapClass, &gWrapObj, &gWrapHandle);
+        pm_refresh_object(gCollectionClass, &gCollectionObj, &gCollectionHandle);
+        pm_refresh_object(gPIClass, &gPI_Obj, &gPI_Handle);
+
+        if (gCollectionObj) pm_apply_collection_overrides(gCollectionObj);
+        if (gPI_Obj) pm_apply_playerinfo_overrides(gPI_Obj);
+    }
+
+    if (now - gLastSlowTime > 1.5) {
+        gLastSlowTime = now;
+        pm_apply_static_settings();
+    }
+
+    void *wrap = gWrapObj;
+    if (!wrap) return;
+    if (il2cpp_object_get_class && il2cpp_object_get_class((Il2CppObject *)wrap) != gWrapClass) {
+        gWrapObj = NULL;
+        return;
+    }
+    void *js = *(void **)((char *)wrap + 0xE0);
+    if (!js) return;
+    PMLastGameplayTick = now;
+
+    // 自动打歌 / 全 Perfect
+    if (PMAutoPlay || PMAllPerfect) {
+        if (!gSetResultMethod) pm_prepare_judge_api();
+        void *slots = *(void **)((char *)js + kOff_JS_Slots);
+        if (slots && gSetResultMethod) {
+            void **items = *(void ***)((char *)slots + kOff_List_Items);
+            int size = *(int *)((char *)slots + kOff_List_Size);
+            float t = *(float *)((char *)js + kOff_JS_Time);
+            if (items && size > 0 && size < 100000) {
+                PMLastSlotCount = size;
+                for (int i = 0; i < size; i++) {
+                    void *slot = items[i];
+                    if (!slot) continue;
+                    int result = *(int *)((char *)slot + kOff_Slot_Result);
+                    if (PMAutoPlay && result <= 1) {
+                        float perfect = *(float *)((char *)slot + kOff_Slot_PerfectTime);
+                        if (t + 0.002f < perfect) continue;
+                        if (t - 0.25f > perfect) continue;
+                        pm_call_SetResult(slot, kJudgeDecrypted, true);
+                        __atomic_add_fetch(&PMAutoJudged, 1, __ATOMIC_RELAXED);
+                    } else if (PMAllPerfect && (result == kJudgeReceived || result == kJudgeLost)) {
+                        pm_call_SetResult(slot, kJudgeDecrypted, true);
+                    }
+                }
+            }
+        }
+    }
+
+    // 锁血：血量下降就写回上一次的值
+    if (PMLockHP) {
+        void *gc = *(void **)((char *)wrap + 0xD8);
+        if (gc && gc == gLastGCObj) {
+            int life = *(int *)((char *)gc + 0x58);
+            if (gLastLifeValue >= 0 && life < gLastLifeValue) {
+                *(int *)((char *)gc + 0x58) = gLastLifeValue;
+            } else {
+                gLastLifeValue = life;
+            }
+        } else {
+            gLastGCObj = gc;
+            gLastLifeValue = gc ? *(int *)((char *)gc + 0x58) : -1;
+        }
+    } else {
+        gLastGCObj = NULL;
+        gLastLifeValue = -1;
+    }
+}
+
+@interface PMRuntimeTicker : NSObject
+@property (nonatomic, strong) CADisplayLink *link;
+@end
+
+@implementation PMRuntimeTicker
+- (void)tick:(CADisplayLink *)link { pm_runtime_tick(); }
+@end
+
+static PMRuntimeTicker *gRuntimeTicker = nil;
+
+void PMStartRuntimeFeatures(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!pm_resolve_il2cpp()) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ PMStartRuntimeFeatures(); });
+            return;
+        }
+        pm_prepare_judge_api();
+        if (!gRuntimeTicker) {
+            gRuntimeTicker = [PMRuntimeTicker new];
+            gRuntimeTicker.link = [CADisplayLink displayLinkWithTarget:gRuntimeTicker
+                                                              selector:@selector(tick:)];
+            [gRuntimeTicker.link addToRunLoop:[NSRunLoop mainRunLoop]
+                                      forMode:NSRunLoopCommonModes];
+        }
+        PMLog(@"运行时轮询已启动（不做 inline hook）");
+    });
+}
 
 // ---------------------------------------------------------------------------
 // 安装

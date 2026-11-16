@@ -58,6 +58,7 @@ NSString *PMUnityUUIDString(void);
 void *PMUnityBase(void);
 void PMInstallHooks(void);
 void PMApplySettingsNow(void);
+void PMStartRuntimeFeatures(void);
 
 void PMShowOverlay(void);
 void PMUpdateOverlay(void);
