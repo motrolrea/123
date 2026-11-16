@@ -368,10 +368,8 @@ void PMSetModEntryVisible(bool visible) {
 
 @implementation PMSettingsController {
     UIScrollView *_scroll;
-    PMTabBar *_tabBar;
     UIButton *_closeButton;
     CGFloat _y;
-    NSInteger _tab;
 }
 
 - (BOOL)shouldAutorotate { return NO; }
@@ -407,13 +405,7 @@ void PMSetModEntryVisible(bool visible) {
     [_closeButton addTarget:self action:@selector(onClose) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:_closeButton];
 
-    _tabBar = [[PMTabBar alloc] initWithFrame:CGRectMake(16, 62, self.view.bounds.size.width - 32, 38)];
-    _tabBar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    __weak PMSettingsController *weakSelf = self;
-    _tabBar.onSelect = ^(NSInteger index) { [weakSelf switchTab:index]; };
-    [self.view addSubview:_tabBar];
-
-    _scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 106, self.view.bounds.size.width, self.view.bounds.size.height - 106)];
+    _scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 72, self.view.bounds.size.width, self.view.bounds.size.height - 72)];
     _scroll.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     _scroll.alwaysBounceVertical = YES;
     _scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
@@ -432,7 +424,7 @@ void PMSetModEntryVisible(bool visible) {
     CGFloat w = self.view.bounds.size.width;
     CGFloat h = self.view.bounds.size.height;
     _closeButton.frame = CGRectMake(w - 22 - 40, 14, 40, 40);
-    _scroll.frame = CGRectMake(0, 106, w, h - 106);
+    _scroll.frame = CGRectMake(0, 72, w, h - 72);
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -452,24 +444,16 @@ void PMSetModEntryVisible(bool visible) {
     }
 }
 
-- (void)switchTab:(NSInteger)index {
-    if (_tab == index) return;
-    _tab = index;
-    [self rebuild];
-}
-
 - (void)rebuild {
     for (UIView *v in _scroll.subviews) [v removeFromSuperview];
     gStatusLabel = nil;
     _y = 6;
 
-    switch (_tab) {
-        case 0: [self buildGameplay]; break;
-        case 1: [self buildUnlock]; break;
-        case 2: [self buildProfile]; break;
-        case 3: [self buildInterface]; break;
-        default: [self buildDiagnostics]; break;
-    }
+    [self buildGameplay];
+    [self buildUnlock];
+    [self buildProfile];
+    [self buildInterface];
+    [self buildDiagnostics];
     _scroll.contentSize = CGSizeMake(self.view.bounds.size.width, _y + 24);
 }
 
@@ -504,6 +488,10 @@ void PMSetModEntryVisible(bool visible) {
                 tag:PMRowUnlockBg on:PMUnlockBackgrounds];
     [self toggleRow:@"挑战" detail:@"IsChallengeUnlocked 本地放行"
                 tag:PMRowUnlockChallenge on:PMUnlockChallenges];
+
+    [self section:@"网络"];
+    [self toggleRow:@"屏蔽成绩上传" detail:@"本地拦截 /play/upload 请求，成绩只留本机"
+                tag:PMRowBlockUpload on:PMBlockUpload];
 }
 
 // ------------------------------ 资料 ------------------------------
@@ -573,12 +561,17 @@ void PMSetModEntryVisible(bool visible) {
 
 // ------------------------------ 通用行 ------------------------------
 - (void)section:(NSString *)title {
-    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(24, _y, self.view.bounds.size.width - 48, 20)];
+    CGFloat w = self.view.bounds.size.width - 28;
+    PMCardView *board = [[PMCardView alloc] initWithFrame:CGRectMake(14, _y, w, 30)];
+    board.fillColor = [UIColor colorWithWhite:1 alpha:0.11];
+    [_scroll addSubview:board];
+
+    UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(30, 5, w - 60, 20)];
     l.text = title;
-    l.font = [UIFont boldSystemFontOfSize:12];
-    l.textColor = PMAccentColor();
-    [_scroll addSubview:l];
-    _y += 26;
+    l.font = [UIFont boldSystemFontOfSize:13];
+    l.textColor = UIColor.whiteColor;
+    [board addSubview:l];
+    _y += 36;
 }
 
 - (void)toggleRow:(NSString *)title detail:(NSString *)detail tag:(NSInteger)tag on:(BOOL)on {

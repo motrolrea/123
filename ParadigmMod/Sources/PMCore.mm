@@ -911,6 +911,12 @@ static CFTimeInterval gLastFindTime = 0;
 static CFTimeInterval gLastSlowTime = 0;
 static int gLastLifeValue = -1;
 static void *gLastGCObj = NULL;
+static Il2CppClass *gGCClass = NULL;
+static const MethodInfo *gGetLifeTypeM = NULL;
+static const MethodInfo *gSetLifeTypeM = NULL;
+static void *gLifeJs = NULL;
+static int gSavedLifeType = 0;
+static bool gLifeTypeSaved = false;
 static Il2CppClass *gSettingsClass = NULL;
 static void *gSettingsObj = NULL;
 static void *gSettingsHandle = NULL;
@@ -968,6 +974,20 @@ static void pm_refresh_object(Il2CppClass *k, void **slot, void **handle) {
     *slot = o;
 }
 
+static int pm_get_lifetype(void) {
+    if (!gGetLifeTypeM || !il2cpp_runtime_invoke) return 0;
+    Il2CppObject *boxed = il2cpp_runtime_invoke(gGetLifeTypeM, NULL, NULL, NULL);
+    if (!boxed) return 0;
+    return *(int *)((char *)boxed + 0x10);
+}
+
+static void pm_set_lifetype(int v) {
+    if (!gSetLifeTypeM || !il2cpp_runtime_invoke) return;
+    int32_t val = v;
+    void *args[1] = {&val};
+    il2cpp_runtime_invoke(gSetLifeTypeM, NULL, args, NULL);
+}
+
 static void pm_runtime_tick(void) {
     if (!PMIl2CppReady) return;
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
@@ -979,6 +999,11 @@ static void pm_runtime_tick(void) {
             gCollectionClass = pm_find_class("CollectionManager");
             gPIClass = pm_find_class("PlayerInfoManager");
             gSettingsClass = pm_find_class_any("GenericSettingsPanel", NULL, 0);
+            gGCClass = pm_find_class("GameControl");
+            if (gGCClass) {
+                gGetLifeTypeM = il2cpp_class_get_method_from_name(gGCClass, "get_LifeType", 0);
+                gSetLifeTypeM = il2cpp_class_get_method_from_name(gGCClass, "set_LifeType", 1);
+            }
             gFindTypesHost = pm_class_with_static_method("Object", "FindObjectOfType", 2);
             if (gFindTypesHost) {
                 gFindTypeMethod = il2cpp_class_get_method_from_name(gFindTypesHost, "FindObjectOfType", 2);
@@ -1013,8 +1038,33 @@ static void pm_runtime_tick(void) {
         return;
     }
     void *js = *(void **)((char *)wrap + 0xE0);
-    if (!js) return;
+    if (!js) {
+        if (gLifeTypeSaved) {
+            pm_set_lifetype(gSavedLifeType);
+            gLifeTypeSaved = false;
+            gLifeJs = NULL;
+        }
+        return;
+    }
     PMLastGameplayTick = now;
+
+    // 锁血第一步：把 LifeType 设成 None(6)，AddHP 里直接不扣血
+    if (PMLockHP) {
+        if (js != gLifeJs) {
+            if (gLifeTypeSaved) pm_set_lifetype(gSavedLifeType);
+            gSavedLifeType = pm_get_lifetype();
+            gLifeTypeSaved = true;
+            gLifeJs = js;
+            pm_set_lifetype(6);
+            PMLog(@"锁血: LifeType %d -> 6(None)", gSavedLifeType);
+        } else if (pm_get_lifetype() != 6) {
+            pm_set_lifetype(6);
+        }
+    } else if (gLifeTypeSaved) {
+        pm_set_lifetype(gSavedLifeType);
+        gLifeTypeSaved = false;
+        gLifeJs = NULL;
+    }
 
     // 自动打歌 / 全 Perfect
     if (PMAutoPlay || PMAllPerfect) {
@@ -1075,6 +1125,56 @@ static void pm_runtime_tick(void) {
 
 static PMRuntimeTicker *gRuntimeTicker = nil;
 
+// ---------------------------------------------------------------------------
+// 成绩上传拦截：改写 NSURLSession 请求，把 /play/upload* 指向本机黑洞
+// ---------------------------------------------------------------------------
+static BOOL gUploadSwizzled = NO;
+static id (*orig_dt_req)(id, SEL, NSURLRequest *);
+static id (*orig_dt_req_cb)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *));
+
+static NSURLRequest *pm_filter_upload(NSURLRequest *req) {
+    if (!req || !PMBlockUpload) return req;
+    NSString *u = req.URL.absoluteString;
+    if (!u) return req;
+    if ([u containsString:@"/play/upload"]) {
+        static int logged = 0;
+        if (__atomic_fetch_add(&logged, 1, __ATOMIC_RELAXED) < 3) {
+            PMLog(@"已拦截成绩上传请求: %@", u);
+        }
+        NSMutableURLRequest *m = [req mutableCopy];
+        m.URL = [NSURL URLWithString:@"http://127.0.0.1:1/__pm_blocked__"];
+        return m;
+    }
+    return req;
+}
+
+static id pm_dt_req(id self, SEL _cmd, NSURLRequest *req) {
+    return orig_dt_req(self, _cmd, pm_filter_upload(req));
+}
+
+static id pm_dt_req_cb(id self, SEL _cmd, NSURLRequest *req,
+                       void (^cb)(NSData *, NSURLResponse *, NSError *)) {
+    return orig_dt_req_cb(self, _cmd, pm_filter_upload(req), cb);
+}
+
+static void pm_install_upload_block(void) {
+    if (gUploadSwizzled) return;
+    gUploadSwizzled = YES;
+    Class c = NSClassFromString(@"NSURLSession");
+    if (!c) return;
+    Method m1 = class_getInstanceMethod(c, @selector(dataTaskWithRequest:));
+    if (m1) {
+        orig_dt_req = (void *)method_getImplementation(m1);
+        method_setImplementation(m1, (IMP)pm_dt_req);
+    }
+    Method m2 = class_getInstanceMethod(c, @selector(dataTaskWithRequest:completionHandler:));
+    if (m2) {
+        orig_dt_req_cb = (void *)method_getImplementation(m2);
+        method_setImplementation(m2, (IMP)pm_dt_req_cb);
+    }
+    PMLog(@"上传拦截已安装: %d/%d", m1 != NULL, m2 != NULL);
+}
+
 void PMStartRuntimeFeatures(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!pm_resolve_il2cpp()) {
@@ -1083,6 +1183,7 @@ void PMStartRuntimeFeatures(void) {
             return;
         }
         pm_prepare_judge_api();
+        pm_install_upload_block();
         if (!gRuntimeTicker) {
             gRuntimeTicker = [PMRuntimeTicker new];
             gRuntimeTicker.link = [CADisplayLink displayLinkWithTarget:gRuntimeTicker
