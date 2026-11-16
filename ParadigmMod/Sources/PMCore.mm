@@ -826,6 +826,14 @@ static void pm_apply_collection_overrides(void *self) {
 
 static void pm_apply_playerinfo_overrides(void *self) {
     if (!self) return;
+    static BOOL loggedOnce = NO;
+    if (!loggedOnce) {
+        loggedOnce = YES;
+        PMLog(@"资料覆盖: rating=%@ level=%@ (共 %lu 项)",
+              PMProfileValue(@"rating") ?: @"(空)",
+              PMProfileValue(@"level") ?: @"(空)",
+              (unsigned long)PMProfileText.count);
+    }
     pm_set_text_at(self, kOff_PI_Level, @"level");
     NSString *rv = PMProfileValue(@"rating");
     if (rv.length) {
@@ -944,9 +952,20 @@ static void pm_write_all_skin_records(void) {
     }
     if (written > 0) {
         pm_call_static_void("KVDB", "Bump");
+        pm_call_static_void("KVDB", "FlushStash");
         pm_call_static_void("PlayerHelper", "AutoSkinUnlockInvariance");
+        pm_call_static_void("PlayerHelper", "RefreshInfo");
         gSkinRecordsDone = true;
         PMLog(@"已写入 %d 条皮肤解锁记录（本地 KVDB）", written);
+
+        // 用游戏自己的接口读回来确认记录真的生效了
+        Il2CppClass *stCls = pm_find_class("SkinUnlockStorage");
+        const MethodInfo *mGetAll = stCls ? il2cpp_class_get_method_from_name(stCls, "GetAll", 0) : NULL;
+        if (stCls && mGetAll && il2cpp_object_new) {
+            void *boxed = il2cpp_object_new(stCls);
+            Il2CppObject *list = boxed ? il2cpp_runtime_invoke(mGetAll, boxed, NULL, NULL) : NULL;
+            PMLog(@"皮肤存储回读: GetAll() = %d 条", list ? *(int *)((char *)list + 0x18) : -1);
+        }
     }
 }
 
@@ -1418,6 +1437,19 @@ static void pm_tab_add_cell(void *tab, void *cell) {    if (!tab || !cell) retur
     pm_call_obj(tab, "Add", 1, a);
 }
 
+static int pm_child_count(void *tr) {
+    if (!pm_ptr_ok(tr)) return -1;
+    Il2CppObject *boxed = pm_call_obj(tr, "get_childCount", 0, NULL);
+    return boxed ? *(int *)((char *)boxed + 0x10) : -1;
+}
+
+static void *pm_get_child(void *tr, int idx) {
+    if (!pm_ptr_ok(tr)) return NULL;
+    int32_t i = idx;
+    void *a[1] = {&i};
+    return pm_call_obj(tr, "GetChild", 1, a);
+}
+
 static void pm_go_set_active(void *go, bool active) {
     if (!go) return;
     uint8_t v = active ? 1 : 0;
@@ -1497,24 +1529,56 @@ static BOOL pm_build_mod_tab(void *gsp) {
         return NO;
     }
     void *srcView = *(void **)((char *)srcTab + 0x18);
-    void *srcTr = srcView ? pm_call_obj(srcView, "get_transform", 0, NULL) : NULL;
-    void *parentTr = srcTr ? pm_call_obj(srcTr, "get_parent", 0, NULL) : NULL;
+    void *tabProto = *(void **)((char *)gsp + 0x48);
+    void *viewProto = *(void **)((char *)gsp + 0x50);
+    if (!pm_ptr_ok(srcView) || !pm_ptr_ok(tabProto) || !pm_ptr_ok(viewProto)) {
+        PMLog(@"Mod页: 模板异常 view=%p tabProto=%p viewProto=%p", srcView, tabProto, viewProto);
+        return NO;
+    }
+    void *tabParent = pm_call_obj(tabProto, "get_parent", 0, NULL);
+    void *viewParent = pm_call_obj(viewProto, "get_parent", 0, NULL);
     const MethodInfo *mInst = il2cpp_class_get_method_from_name(gFindTypesHost, "Instantiate", 2);
-    if (!pm_ptr_ok(srcView) || !pm_ptr_ok(parentTr) || !mInst) {
-        PMLog(@"Mod页: 模板页异常 view=%p parent=%p", srcView, parentTr);
+    if (!pm_ptr_ok(tabParent) || !pm_ptr_ok(viewParent) || !mInst) {
+        PMLog(@"Mod页: 容器异常 tabParent=%p viewParent=%p inst=%p", tabParent, viewParent, mInst);
         return NO;
     }
 
-    void *iargs[2] = {srcView, parentTr};
-    Il2CppException *exc = NULL;
-    Il2CppObject *page = il2cpp_runtime_invoke(mInst, NULL, iargs, &exc);
-    if (!page) {
-        PMLog(@"Mod页: 克隆设置页失败");
+    int32_t nextTab = *(int32_t *)((char *)gsp + 0x20);
+    int tabChildren = pm_child_count(tabParent);
+    int viewChildren = pm_child_count(viewParent);
+    int pn = *(int *)((char *)pages + 0x18);
+    PMLog(@"Mod页: nextTab=%d tabChild=%d viewChild=%d viewPages=%d", nextTab, tabChildren, viewChildren, pn);
+
+    // 官方 Add() 是从 tabProto 的父节点按 nextTabIndex 取子物体当按钮，
+    // 不够就先克隆一个占位，否则 Add 会取到空指针。
+    int guard = 0;
+    while (tabChildren <= nextTab && guard++ < 8) {
+        void *protoGO = pm_call_obj(tabProto, "get_gameObject", 0, NULL);
+        void *ia[2] = {protoGO, tabParent};
+        Il2CppException *ex = NULL;
+        il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
+        if (ex) { PMLog(@"Mod页: 克隆 Tab 按钮失败"); break; }
+        tabChildren = pm_child_count(tabParent);
+    }
+
+    // 页面容器同理：viewPages 只记录已启用的页，第 pn 个子物体才是我们要的新页
+    guard = 0;
+    while (viewChildren <= pn && guard++ < 8) {
+        void *protoGO = pm_call_obj(viewProto, "get_gameObject", 0, NULL);
+        void *ia[2] = {protoGO, viewParent};
+        Il2CppException *ex = NULL;
+        il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
+        if (ex) { PMLog(@"Mod页: 克隆设置页失败"); break; }
+        viewChildren = pm_child_count(viewParent);
+    }
+    if (viewChildren <= pn) {
+        PMLog(@"Mod页: 页面容器子物体不足 %d <= %d", viewChildren, pn);
         return NO;
     }
-    void *pageTr = pm_call_obj((void *)page, "get_transform", 0, NULL);
-    if (!pageTr) {
-        PMLog(@"Mod页: 克隆页没有 Transform");
+    void *pageTr = pm_get_child(viewParent, pn);
+    void *page = pageTr ? pm_call_obj(pageTr, "get_gameObject", 0, NULL) : NULL;
+    if (!pm_ptr_ok(page)) {
+        PMLog(@"Mod页: 取新页失败 page=%p", page);
         return NO;
     }
     void *pargs[1] = {pageTr};
