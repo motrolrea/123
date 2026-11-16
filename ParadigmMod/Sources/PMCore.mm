@@ -1218,6 +1218,23 @@ static BOOL pm_tab_has_choice(void *tab) {
     return NO;
 }
 
+// 模板页里是否有标题分区原型（同页必须已经用过 TitleCell，原型才存在）
+static BOOL pm_tab_has_title(void *tab) {
+    void *cells = tab ? *(void **)((char *)tab + 0x28) : NULL;
+    if (!cells) return NO;
+    int cn = *(int *)((char *)cells + 0x18);
+    void **citems = *(void ***)((char *)cells + 0x10);
+    if (cn <= 0 || cn > 5000 || !citems) return NO;
+    for (int j = 0; j < cn; j++) {
+        void *cell = citems[j];
+        if (!cell) continue;
+        Il2CppClass *k = *(Il2CppClass **)cell;
+        const char *name = k ? il2cpp_class_get_name(k) : NULL;
+        if (name && strcmp(name, "TitleCell") == 0) return YES;
+    }
+    return NO;
+}
+
 static void pm_tab_add_cell(void *tab, void *cell) {
     if (!tab || !cell) return;
     void *a[1] = {cell};
@@ -1262,9 +1279,20 @@ static BOOL pm_build_mod_tab(void *gsp) {
     }
 
     void *srcTab = NULL;
+    BOOL srcHasTitle = NO;
     for (int i = 0; i < tn; i++) {
-        if (pm_tab_has_choice(titems[i])) { srcTab = titems[i]; break; }
+        if (pm_tab_has_choice(titems[i]) && pm_tab_has_title(titems[i])) {
+            srcTab = titems[i];
+            srcHasTitle = YES;
+            break;
+        }
     }
+    if (!srcTab) {
+        for (int i = 0; i < tn; i++) {
+            if (pm_tab_has_choice(titems[i])) { srcTab = titems[i]; break; }
+        }
+    }
+    if (srcTab && !srcHasTitle) srcHasTitle = pm_tab_has_title(srcTab);
     if (!srcTab) {
         PMLog(@"Mod页: 没有可用的模板页");
         return NO;
@@ -1329,7 +1357,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
     int count = (int)(sizeof(rows) / sizeof(rows[0]));
     int made = 0;
     for (int i = 0; i < count; i++) {
-        if (rows[i].section && gTitleCellClass) {
+        if (rows[i].section && gTitleCellClass && srcHasTitle) {
             pm_tab_add_cell(tab, pm_new_title_cell(rows[i].section));
         }
         void *cell = pm_new_choice_cell(rows[i].label, rows[i].key, rows[i].def);
