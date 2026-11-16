@@ -28,6 +28,10 @@
 #include <math.h>
 #include <ctype.h>
 #include <libkern/OSCacheControl.h>
+#include <signal.h>
+#include <ucontext.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 // ---------------------------------------------------------------------------
 // 全局状态（悬浮球 / 设置页修改）
@@ -216,8 +220,43 @@ static void pm_uncaught_handler(NSException *e) {
     PMLog(@"💥 未捕获异常 %@: %@\n%@", e.name, e.reason, [e.callStackSymbols componentsJoinedByString:@"\n"]);
 }
 
+// 信号崩溃也写日志（异步信号安全：只用 open/write/close）
+static char gLogPathC[1024] = {0};
+
+static void pm_signal_handler(int sig, siginfo_t *info, void *uctx) {
+    uintptr_t pc = 0, lr = 0, far = 0;
+    ucontext_t *uc = (ucontext_t *)uctx;
+    if (uc) {
+        pc = (uintptr_t)uc->uc_mcontext->__ss.__pc;
+        lr = (uintptr_t)uc->uc_mcontext->__ss.__lr;
+        far = (uintptr_t)uc->uc_mcontext->__es.__far;
+    }
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf), "\n[CRASH] sig=%d pc=%p lr=%p far=%p\n",
+                     sig, (void *)pc, (void *)lr, (void *)far);
+    if (n > 0 && gLogPathC[0]) {
+        int fd = open(gLogPathC, O_WRONLY | O_APPEND | O_CREAT, 0644);
+        if (fd >= 0) {
+            write(fd, buf, (size_t)n);
+            close(fd);
+        }
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 void PMLogInstallCrashHandler(void) {
     NSSetUncaughtExceptionHandler(&pm_uncaught_handler);
+    strncpy(gLogPathC, [PMLogPath() fileSystemRepresentation], sizeof(gLogPathC) - 1);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = pm_signal_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGTRAP, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
     PMLog(@"日志文件: %@", PMLogPath());
 }
 

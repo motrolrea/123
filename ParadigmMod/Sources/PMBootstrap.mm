@@ -62,6 +62,9 @@ static void PMBootstrap(void) {
     });
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        // 等游戏完成启动再装 hook：避免开局阶段就调用到被改写的函数
+        [NSThread sleepForTimeInterval:12.0];
+        PMLog(@"延迟结束，开始安装 hook");
         for (int i = 0; i < 6; i++) {
             @autoreleasepool {
                 if (PMUnityBase()) {
