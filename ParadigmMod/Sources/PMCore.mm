@@ -18,7 +18,6 @@
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <mach/vm_map.h>
 #include <sys/mman.h>
 #include <string.h>
@@ -301,8 +300,8 @@ NSString *PMUnityUUIDString(void) {
 static bool pm_make_writable(void *addr, size_t size) {
     vm_address_t page = (vm_address_t)addr & ~(vm_page_size - 1);
     size_t span = ((vm_address_t)addr + size) - page;
-    kern_return_t kr = mach_vm_protect(mach_task_self(), page, span, FALSE,
-                                       VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    kern_return_t kr = vm_protect(mach_task_self(), page, span, FALSE,
+                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) {
         kr = vm_protect(mach_task_self(), page, span, FALSE,
                         VM_PROT_READ | VM_PROT_WRITE);
@@ -318,7 +317,7 @@ static bool pm_make_writable(void *addr, size_t size) {
 static void pm_restore_executable(void *addr, size_t size) {
     vm_address_t page = (vm_address_t)addr & ~(vm_page_size - 1);
     size_t span = ((vm_address_t)addr + size) - page;
-    mach_vm_protect(mach_task_self(), page, span, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    vm_protect(mach_task_self(), page, span, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
 }
 
 // ldr x16, #8 ; br x16 ; .quad target
