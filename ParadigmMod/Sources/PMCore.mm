@@ -1164,12 +1164,12 @@ static void pm_install_upload_block(void) {
     if (!c) return;
     Method m1 = class_getInstanceMethod(c, @selector(dataTaskWithRequest:));
     if (m1) {
-        orig_dt_req = (void *)method_getImplementation(m1);
+        orig_dt_req = (__typeof__(orig_dt_req))method_getImplementation(m1);
         method_setImplementation(m1, (IMP)pm_dt_req);
     }
     Method m2 = class_getInstanceMethod(c, @selector(dataTaskWithRequest:completionHandler:));
     if (m2) {
-        orig_dt_req_cb = (void *)method_getImplementation(m2);
+        orig_dt_req_cb = (__typeof__(orig_dt_req_cb))method_getImplementation(m2);
         method_setImplementation(m2, (IMP)pm_dt_req_cb);
     }
     PMLog(@"上传拦截已安装: %d/%d", m1 != NULL, m2 != NULL);
