@@ -1,3 +1,4 @@
+#define _XOPEN_SOURCE 700
 //
 //  RizlineMod —— 《律动轨迹》iOS 2.7.1 (com.leiting.ldgj) 注入型 mod 核心
 //  适用于已解密（cryptid=0）的 UnityFramework + 未签名 / TrollStore 安装环境

@@ -18,7 +18,6 @@ static void RMBootstrap(void) {
     RMNoBad          = [d boolForKey:@"rm.nobad"];
     RMFreeHold       = [d boolForKey:@"rm.freehold"];
     RMLockHP         = [d boolForKey:@"rm.hp"];
-    RMHideHealthBar  = [d boolForKey:@"rm.hp.hide"];
     RMUnlockAllSongs = [d boolForKey:@"rm.unlock"];
     RMBlockUpload    = [d boolForKey:@"rm.block"];
     RMBallVisible    = [d objectForKey:@"rm.ball.show"] ? [d boolForKey:@"rm.ball.show"] : YES;

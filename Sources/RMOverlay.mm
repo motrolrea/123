@@ -334,7 +334,7 @@ static UIWindowScene *rm_active_scene(void) {
 
     _tabBar = [[RMTabBar alloc] initWithFrame:CGRectMake(16, 66, self.view.bounds.size.width - 32, 40)];
     _tabBar.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    __weak typeof(self) weakSelf = self;
+    __weak RMSettingsController *weakSelf = self;
     _tabBar.onSelect = ^(NSInteger index) {
         weakSelf->_tab = index;
         [weakSelf rebuild];
