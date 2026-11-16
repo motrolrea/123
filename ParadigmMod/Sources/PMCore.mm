@@ -451,6 +451,8 @@ static void *(*il2cpp_gchandle_new)(Il2CppObject *, bool);
 static void (*il2cpp_gchandle_free)(void *);
 static size_t (*il2cpp_image_get_class_count)(const Il2CppImage *);
 static Il2CppClass *(*il2cpp_image_get_class)(const Il2CppImage *, size_t);
+static const char *(*il2cpp_class_get_namespace)(Il2CppClass *);
+static Il2CppObject *(*il2cpp_array_new)(Il2CppClass *, size_t);
 
 static MethodInfo *gSetResultMethod = NULL;
 
@@ -480,6 +482,8 @@ static bool pm_resolve_il2cpp(void) {
     il2cpp_gchandle_free = (__typeof__(il2cpp_gchandle_free))dlsym(h, "il2cpp_gchandle_free");
     il2cpp_image_get_class_count = (__typeof__(il2cpp_image_get_class_count))dlsym(h, "il2cpp_image_get_class_count");
     il2cpp_image_get_class = (__typeof__(il2cpp_image_get_class))dlsym(h, "il2cpp_image_get_class");
+    il2cpp_class_get_namespace = (__typeof__(il2cpp_class_get_namespace))dlsym(h, "il2cpp_class_get_namespace");
+    il2cpp_array_new = (__typeof__(il2cpp_array_new))dlsym(h, "il2cpp_array_new");
 #undef RESOLVE
     PMIl2CppReady = true;
     return true;
@@ -975,6 +979,129 @@ static void pm_refresh_object(Il2CppClass *k, void **slot, void **handle) {
     *slot = o;
 }
 
+static Il2CppClass *pm_class_in_namespace(const char *name, const char *ns, const char *method, int argc) {
+    Il2CppDomain *domain = il2cpp_domain_get();
+    if (!domain) return NULL;
+    if (il2cpp_thread_attach) il2cpp_thread_attach(domain);
+    size_t count = 0;
+    const Il2CppAssembly **asms = il2cpp_domain_get_assemblies(domain, &count);
+    if (!asms || count == 0) return NULL;
+    if (!il2cpp_image_get_class_count || !il2cpp_image_get_class) return NULL;
+    for (size_t i = 0; i < count; i++) {
+        Il2CppImage *img = il2cpp_assembly_get_image(asms[i]);
+        if (!img) continue;
+        size_t n = il2cpp_image_get_class_count(img);
+        if (n > 40000) n = 40000;
+        for (size_t j = 0; j < n; j++) {
+            Il2CppClass *c = il2cpp_image_get_class(img, j);
+            if (!c) continue;
+            const char *cn = il2cpp_class_get_name(c);
+            if (!cn || strcmp(cn, name)) continue;
+            const char *cns = il2cpp_class_get_namespace ? il2cpp_class_get_namespace(c) : "";
+            if (ns && (!cns || strcmp(cns, ns))) continue;
+            if (method && !il2cpp_class_get_method_from_name(c, method, argc)) continue;
+            return c;
+        }
+    }
+    return NULL;
+}
+
+static void *pm_call_obj(void *obj, const char *name, int argc, void **args) {
+    if (!obj || !il2cpp_object_get_class) return NULL;
+    Il2CppClass *k = il2cpp_object_get_class((Il2CppObject *)obj);
+    if (!k) return NULL;
+    const MethodInfo *m = il2cpp_class_get_method_from_name(k, name, argc);
+    if (!m) return NULL;
+    Il2CppException *exc = NULL;
+    return il2cpp_runtime_invoke(m, obj, args, &exc);
+}
+
+static void *gCloneTabGO = NULL;
+static BOOL gEntryInjected = NO;
+
+// 在官方设置侧栏里克隆一项「Mod设置」
+static BOOL pm_try_official_entry(void *gsp, CGRect *outRect) {
+    if (!gsp || !gFindTypesHost || !il2cpp_array_new) return NO;
+    void *tabs = *(void **)((char *)gsp + 0x40);
+    if (!tabs) return NO;
+    int n = *(int *)((char *)tabs + 0x18);
+    void **items = *(void ***)((char *)tabs + 0x10);
+    if (n <= 0 || !items) return NO;
+    void *srcTab = items[n - 1];
+    void *srcGO = srcTab ? *(void **)((char *)srcTab + 0x10) : NULL;
+    if (!srcGO) return NO;
+
+    void *srcTr = pm_call_obj(srcGO, "get_transform", 0, NULL);
+    if (!srcTr) return NO;
+
+    Il2CppClass *vec3 = pm_find_class_any("Vector3", NULL, 0);
+    if (!vec3) return NO;
+    Il2CppObject *corners = il2cpp_array_new(vec3, 4);
+    if (!corners) return NO;
+    void *cargs[1] = {corners};
+    pm_call_obj(srcTr, "GetWorldCorners", 1, cargs);
+    float *pts = (float *)((char *)corners + 0x20);
+    float minX = pts[0], maxX = pts[0], minY = pts[1], maxY = pts[1];
+    for (int i = 1; i < 4; i++) {
+        float x = pts[i * 3], y = pts[i * 3 + 1];
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+    }
+    float h = maxY - minY;
+    if (h < 4 || (maxX - minX) < 4) return NO;
+
+    void *parentTr = pm_call_obj(srcTr, "get_parent", 0, NULL);
+    const MethodInfo *mInst = il2cpp_class_get_method_from_name(gFindTypesHost, "Instantiate", 2);
+    if (!mInst) return NO;
+    void *iargs[2] = {srcGO, parentTr};
+    Il2CppException *exc = NULL;
+    Il2CppObject *clone = il2cpp_runtime_invoke(mInst, NULL, iargs, &exc);
+    if (!clone) return NO;
+    gCloneTabGO = clone;
+
+    Il2CppClass *textCls = pm_class_in_namespace("Text", "UnityEngine.UI", NULL, 0);
+    if (!textCls || !il2cpp_type_get_object || !il2cpp_class_get_type) return NO;
+    void *typeObj = il2cpp_type_get_object(il2cpp_class_get_type(textCls));
+    void *gargs[1] = {typeObj};
+    Il2CppObject *comps = (Il2CppObject *)pm_call_obj((void *)clone, "GetComponentsInChildren", 1, gargs);
+    if (!comps) return NO;
+    int cn = *(int *)((char *)comps + 0x18);
+    void **citems = *(void ***)((char *)comps + 0x20);
+    Il2CppString *title = il2cpp_string_new("Mod设置");
+    for (int i = 0; i < cn; i++) {
+        if (!citems[i] || !title) continue;
+        void *targs[1] = {title};
+        pm_call_obj(citems[i], "set_text", 1, targs);
+    }
+
+    void *cloneTr = pm_call_obj((void *)clone, "get_transform", 0, NULL);
+    if (!cloneTr) return NO;
+    float pos[3] = {(minX + maxX) / 2.0f, (minY + maxY) / 2.0f - h, 0};
+    void *pargs[1] = {pos};
+    pm_call_obj(cloneTr, "set_position", 1, pargs);
+
+    if (outRect) {
+        outRect->origin.x = minX;
+        outRect->origin.y = minY - h;
+        outRect->size.width = maxX - minX;
+        outRect->size.height = h;
+    }
+    PMLog(@"官方 Mod设置项已注入: rect=(%.0f, %.0f, %.0f, %.0f)", minX, minY - h, maxX - minX, h);
+    return YES;
+}
+
+static void pm_remove_official_entry(void) {
+    if (!gCloneTabGO || !gFindTypesHost) return;
+    const MethodInfo *mDestroy = il2cpp_class_get_method_from_name(gFindTypesHost, "Destroy", 1);
+    if (mDestroy) {
+        void *args[1] = {gCloneTabGO};
+        il2cpp_runtime_invoke(mDestroy, NULL, args, NULL);
+    }
+    gCloneTabGO = NULL;
+}
+
 static int pm_get_lifetype(void) {
     if (!gGetLifeTypeM || !il2cpp_runtime_invoke) return 0;
     Il2CppObject *boxed = il2cpp_runtime_invoke(gGetLifeTypeM, NULL, NULL, NULL);
@@ -1017,10 +1144,23 @@ static void pm_runtime_tick(void) {
         pm_refresh_object(gPIClass, &gPI_Obj, &gPI_Handle);
         pm_refresh_object(gSettingsClass, &gSettingsObj, &gSettingsHandle);
 
-        BOOL visible = (gSettingsObj != NULL);
-        if (visible != gEntryVisible) {
-            gEntryVisible = visible;
-            PMSetModEntryVisible(visible);
+        if (gSettingsObj) {
+            if (!gEntryInjected) {
+                gEntryInjected = YES;
+                CGRect rect;
+                if (pm_try_official_entry(gSettingsObj, &rect)) {
+                    PMSetModEntryRect(rect);
+                } else {
+                    PMLog(@"官方侧栏克隆失败，改用覆盖入口");
+                    PMSetModEntryVisible(true);
+                }
+                gEntryVisible = YES;
+            }
+        } else if (gEntryVisible) {
+            gEntryVisible = NO;
+            gEntryInjected = NO;
+            pm_remove_official_entry();
+            PMSetModEntryVisible(false);
         }
 
         if (gCollectionObj) pm_apply_collection_overrides(gCollectionObj);

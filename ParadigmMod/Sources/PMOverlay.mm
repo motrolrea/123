@@ -329,32 +329,75 @@ static UIWindow *gEntryWindow = nil;
 }
 @end
 
+@interface PMEntryHitView : UIControl
+@end
+
+@implementation PMEntryHitView
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.backgroundColor = UIColor.clearColor;
+        self.opaque = NO;
+        [self addTarget:self action:@selector(onTap) forControlEvents:UIControlEventTouchUpInside];
+    }
+    return self;
+}
+- (void)onTap { pm_open_panel(); }
+- (void)setHighlighted:(BOOL)highlighted {
+    [super setHighlighted:highlighted];
+    self.alpha = highlighted ? 0.5 : 1.0;
+}
+@end
+
+static void pm_prepare_entry_window(CGRect f) {
+    UIWindowScene *scene = pm_active_scene();
+    if (!gEntryWindow) {
+        gEntryWindow = scene ? [[UIWindow alloc] initWithWindowScene:scene]
+                             : [[UIWindow alloc] initWithFrame:f];
+        gEntryWindow.windowLevel = UIWindowLevelAlert + 1;
+        gEntryWindow.backgroundColor = UIColor.clearColor;
+        UIViewController *root = [UIViewController new];
+        root.view.backgroundColor = UIColor.clearColor;
+        gEntryWindow.rootViewController = root;
+    }
+    gEntryWindow.frame = f;
+    UIView *host = gEntryWindow.rootViewController.view;
+    for (UIView *v in host.subviews) [v removeFromSuperview];
+    host.backgroundColor = UIColor.clearColor;
+}
+
+// 官方侧栏里的「Mod设置」已经由 Unity 克隆出来，这里只铺一层透明点击区
+void PMSetModEntryRect(CGRect screenRect) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindowScene *scene = pm_active_scene();
+        CGRect sb = scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
+        CGFloat uy = sb.size.height - (screenRect.origin.y + screenRect.size.height);
+        CGRect f = CGRectMake(screenRect.origin.x,
+                              uy,
+                              MAX(80, screenRect.size.width),
+                              MAX(36, screenRect.size.height));
+        pm_prepare_entry_window(f);
+        PMEntryHitView *hit = [[PMEntryHitView alloc] initWithFrame:CGRectMake(0, 0, f.size.width, f.size.height)];
+        [gEntryWindow.rootViewController.view addSubview:hit];
+        gEntryWindow.hidden = NO;
+    });
+}
+
 void PMSetModEntryVisible(bool visible) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!visible) {
             gEntryWindow.hidden = YES;
             return;
         }
-        if (!gEntryWindow) {
-            UIWindowScene *scene = pm_active_scene();
-            CGRect sb = scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
-            // 贴在官方设置左侧分类栏「其他设置」下方
-            CGFloat w = sb.size.width * 0.30;
-            CGFloat h = 44;
-            CGFloat x = sb.size.width * 0.115;
-            CGFloat y = sb.size.height * 0.665;
-            CGRect f = CGRectMake(x, y, w, h);
-            gEntryWindow = scene ? [[UIWindow alloc] initWithWindowScene:scene]
-                                 : [[UIWindow alloc] initWithFrame:f];
-            gEntryWindow.frame = f;
-            gEntryWindow.windowLevel = UIWindowLevelAlert + 1;
-            gEntryWindow.backgroundColor = UIColor.clearColor;
-            UIViewController *root = [UIViewController new];
-            root.view.backgroundColor = UIColor.clearColor;
-            gEntryWindow.rootViewController = root;
-            PMEntryButton *b = [[PMEntryButton alloc] initWithFrame:CGRectMake(0, 0, f.size.width, f.size.height)];
-            [root.view addSubview:b];
-        }
+        UIWindowScene *scene = pm_active_scene();
+        CGRect sb = scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
+        CGFloat w = sb.size.width * 0.30;
+        CGFloat h = 44;
+        CGFloat x = sb.size.width * 0.115;
+        CGFloat y = sb.size.height * 0.665;
+        CGRect f = CGRectMake(x, y, w, h);
+        pm_prepare_entry_window(f);
+        PMEntryButton *b = [[PMEntryButton alloc] initWithFrame:CGRectMake(0, 0, f.size.width, f.size.height)];
+        [gEntryWindow.rootViewController.view addSubview:b];
         gEntryWindow.hidden = NO;
     });
 }

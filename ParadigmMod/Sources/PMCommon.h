@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import <CoreGraphics/CoreGraphics.h>
 #include <stdbool.h>
 
 #ifdef __cplusplus
@@ -65,6 +66,8 @@ void PMShowOverlay(void);
 void PMUpdateOverlay(void);
 void PMUpdateBall(void);
 void PMSetModEntryVisible(bool visible);
+// screenRect 为 Unity 屏幕坐标（左下原点），由 Overlay 转成 UIKit 坐标
+void PMSetModEntryRect(CGRect screenRect);
 
 #ifdef __cplusplus
 }
