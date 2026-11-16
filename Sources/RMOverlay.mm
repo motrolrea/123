@@ -811,19 +811,28 @@ void RMUpdateBall(void) {
     });
 }
 
-// 游玩时自动收起悬浮球 / 小点，避免误触
+// 游玩时自动收起悬浮球 / 小点，避免误触；屏幕旋转后重新布局
 static void rm_ball_tick(void) {
     if (!gBallWindow) return;
-    if (gBallMode != rm_desired_ball_mode()) RMUpdateBall();
+    static CGSize lastSize = {0, 0};
+    UIWindowScene *scene = rm_active_scene();
+    CGSize now = scene ? scene.coordinateSpace.bounds.size : UIScreen.mainScreen.bounds.size;
+    BOOL sizeChanged = !CGSizeEqualToSize(now, lastSize);
+    if (sizeChanged) lastSize = now;
+    if (sizeChanged || gBallMode != rm_desired_ball_mode()) RMUpdateBall();
 }
 
 void RMShowOverlay(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         static BOOL timerStarted = NO;
+        UIWindowScene *scene = rm_active_scene();
+        if (!scene) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ RMShowOverlay(); });
+            return;
+        }
         if (!gBallWindow) {
-            UIWindowScene *scene = rm_active_scene();
-            gBallWindow = scene ? [[UIWindow alloc] initWithWindowScene:scene]
-                                : [[UIWindow alloc] initWithFrame:CGRectMake(24, 64, 56, 56)];
+            gBallWindow = [[UIWindow alloc] initWithWindowScene:scene];
             gBallWindow.windowLevel = UIWindowLevelAlert + 1;
             gBallWindow.backgroundColor = UIColor.clearColor;
             UIViewController *root = [UIViewController new];
