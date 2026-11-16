@@ -13,8 +13,20 @@ extern bool PMLockHP;
 extern bool PMUnlockAll;
 extern bool PMPaidUnlock;
 extern bool PMUnlockCollection;
+extern bool PMUnlockCharacters;
+extern bool PMUnlockSkins;
+extern bool PMUnlockRelics;
+extern bool PMUnlockStories;
+extern bool PMUnlockTitles;
+extern bool PMUnlockBackgrounds;
+extern bool PMUnlockChallenges;
 extern bool PMBlockUpload;
 extern float PMSpeed;
+extern float PMHitVolumeBoost;
+extern bool PMAutoHideInGame;
+
+// 最近一次判定帧（用于判断是否在游玩中）
+extern volatile double PMLastGameplayTick;
 
 // 个人资料：仅本地显示覆盖（不写存档、不上传）
 extern bool PMProfileEnabled;

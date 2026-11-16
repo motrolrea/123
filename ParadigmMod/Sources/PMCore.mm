@@ -40,6 +40,18 @@ bool PMPaidUnlock = false;
 bool PMUnlockCollection = false;
 bool PMBlockUpload = false;
 float PMSpeed = 1.0f;
+float PMHitVolumeBoost = 1.0f;
+bool PMAutoHideInGame = true;
+
+bool PMUnlockCharacters = false;
+bool PMUnlockSkins = false;
+bool PMUnlockRelics = false;
+bool PMUnlockStories = false;
+bool PMUnlockTitles = false;
+bool PMUnlockBackgrounds = false;
+bool PMUnlockChallenges = false;
+
+volatile double PMLastGameplayTick = 0;
 
 bool PMProfileEnabled = false;
 NSMutableDictionary<NSString *, NSString *> *PMProfileText = nil;
@@ -269,16 +281,23 @@ static void pm_macho_uuid(void *base, char *out, size_t cap) {
 // ---------------------------------------------------------------------------
 // 极简 arm64 inline hook（入口 16 字节 + trampoline）
 // ---------------------------------------------------------------------------
+// iOS 14+ 强制 W^X：不能同时申请 WRITE|EXEC，分两步改权限
 static bool pm_make_writable(void *addr, size_t size) {
     vm_address_t page = (vm_address_t)addr & ~(vm_page_size - 1);
     size_t span = ((vm_address_t)addr + size) - page;
     kern_return_t kr = vm_protect(mach_task_self(), page, span, FALSE,
-                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+                                  VM_PROT_READ | VM_PROT_WRITE);
     if (kr != KERN_SUCCESS) {
-        PMLog(@"vm_protect 失败: %d", kr);
+        PMLog(@"vm_protect(RW) 失败: %d（运行时改代码被系统拦截）", kr);
         return false;
     }
     return true;
+}
+
+static void pm_restore_executable(void *addr, size_t size) {
+    vm_address_t page = (vm_address_t)addr & ~(vm_page_size - 1);
+    size_t span = ((vm_address_t)addr + size) - page;
+    vm_protect(mach_task_self(), page, span, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
 }
 
 // ldr x16, #8 ; br x16 ; .quad target
@@ -289,16 +308,10 @@ static void pm_emit_branch(uint32_t *code, uintptr_t target) {
 }
 
 static void *pm_alloc_trampoline(void) {
-    void *p = mmap(NULL, vm_page_size, PROT_READ | PROT_WRITE | PROT_EXEC,
+    // 先拿 RW 页（写完后由调用方改成 RX；iOS 不允许 RWX）
+    void *p = mmap(NULL, vm_page_size, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (p != MAP_FAILED) return p;
-    // 没有 JIT 权限时不允许 RWX：先 RW，再尝试 RX
-    p = mmap(NULL, vm_page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (p == MAP_FAILED) return NULL;
-    if (mprotect(p, vm_page_size, PROT_READ | PROT_EXEC) != 0) {
-        munmap(p, vm_page_size);
-        return NULL;   // 无法执行就放弃 hook，避免跳到不可执行页崩溃
-    }
     return p;
 }
 
@@ -322,6 +335,11 @@ static void *pm_install_hook(void *target, void *replacement) {
     uint32_t *tc = (uint32_t *)tramp;
     memcpy(tc, entry, 16);
     pm_emit_branch(tc + 4, (uintptr_t)entry + 16);
+    if (mprotect(tramp, vm_page_size, PROT_READ | PROT_EXEC) != 0) {
+        PMLog(@"trampoline mprotect(RX) 失败");
+        munmap(tramp, vm_page_size);
+        return NULL;
+    }
     sys_icache_invalidate(tramp, 32);
 
     if (!pm_make_writable(target, 16)) {
@@ -332,8 +350,7 @@ static void *pm_install_hook(void *target, void *replacement) {
     pm_emit_branch(patch, (uintptr_t)replacement);
     memcpy(entry, patch, 16);
     sys_icache_invalidate(target, 16);
-    vm_protect(mach_task_self(), (vm_address_t)target & ~(vm_page_size - 1), vm_page_size,
-               FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    pm_restore_executable(target, 16);
     PMLog(@"hook %p -> %p (tramp %p)", target, replacement, tramp);
     return tramp;
 }
@@ -428,6 +445,15 @@ static bool pm_set_static_float(const char *klassName, const char *fieldName, fl
     return true;
 }
 
+static bool pm_get_static_float(const char *klassName, const char *fieldName, float *out) {
+    Il2CppClass *k = pm_find_class(klassName);
+    if (!k) return false;
+    FieldInfo *f = il2cpp_class_get_field_from_name(k, fieldName);
+    if (!f) return false;
+    il2cpp_field_static_get_value(f, out);
+    return true;
+}
+
 static bool pm_prepare_judge_api(void) {
     if (gSetResultMethod) return true;
     if (!pm_resolve_il2cpp()) return false;
@@ -458,6 +484,8 @@ static void (*orig_UpdateTime)(void *self) = NULL;
 static void pm_UpdateTime_hook(void *self) {
     if (orig_UpdateTime) orig_UpdateTime(self);
     if (!self) return;
+
+    PMLastGameplayTick = CFAbsoluteTimeGetCurrent();
 
     if (PMLastSlotCount < 0) {
         void *slots = *(void **)((char *)self + kOff_JS_Slots);
@@ -592,17 +620,17 @@ static bool (*orig_IsCharacterUnlocked)(void *arg, void *method) = NULL;
 static bool (*orig_IsChallengeUnlocked)(void *arg, void *method) = NULL;
 
 static bool pm_IsRelicUnlocked_hook(void *arg, void *method) {
-    if (__atomic_load_n(&PMUnlockCollection, __ATOMIC_RELAXED)) return true;
+    if (__atomic_load_n(&PMUnlockRelics, __ATOMIC_RELAXED)) return true;
     return orig_IsRelicUnlocked ? orig_IsRelicUnlocked(arg, method) : false;
 }
 
 static bool pm_IsCharacterUnlocked_hook(void *arg, void *method) {
-    if (__atomic_load_n(&PMUnlockCollection, __ATOMIC_RELAXED)) return true;
+    if (__atomic_load_n(&PMUnlockCharacters, __ATOMIC_RELAXED)) return true;
     return orig_IsCharacterUnlocked ? orig_IsCharacterUnlocked(arg, method) : false;
 }
 
 static bool pm_IsChallengeUnlocked_hook(void *arg, void *method) {
-    if (__atomic_load_n(&PMUnlockCollection, __ATOMIC_RELAXED)) return true;
+    if (__atomic_load_n(&PMUnlockChallenges, __ATOMIC_RELAXED)) return true;
     return orig_IsChallengeUnlocked ? orig_IsChallengeUnlocked(arg, method) : false;
 }
 
@@ -613,12 +641,12 @@ static bool (*orig_IsAchvEnum)(int achv, void *method) = NULL;
 static bool (*orig_IsAchvStruct)(uint64_t achv, void *track) = NULL;
 
 static bool pm_IsAchvEnum_hook(int achv, void *method) {
-    if (__atomic_load_n(&PMUnlockCollection, __ATOMIC_RELAXED)) return true;
+    if (PMUnlockTitles || PMUnlockBackgrounds) return true;
     return orig_IsAchvEnum ? orig_IsAchvEnum(achv, method) : false;
 }
 
 static bool pm_IsAchvStruct_hook(uint64_t achv, void *track) {
-    if (__atomic_load_n(&PMUnlockCollection, __ATOMIC_RELAXED)) return true;
+    if (PMUnlockTitles || PMUnlockBackgrounds) return true;
     return orig_IsAchvStruct ? orig_IsAchvStruct(achv, track) : false;
 }
 
@@ -722,13 +750,14 @@ static void pm_PI_UpdateRating_hook(void *self) {
 }
 
 // ---------------------------------------------------------------------------
-// 周期任务：全解锁 / 变速
+// 周期任务：全解锁 / 打击音量
 // ---------------------------------------------------------------------------
-static float gOrigHiSpeed = 1.0f;
-static bool gHiSpeedCaptured = false;
-static bool gHiSpeedOverridden = false;
 static bool gUnlockAllWritten = false;
-static bool gCollectionUnlockWritten = false;
+static bool gSkinUnlockWritten = false;
+static bool gStoryUnlockWritten = false;
+static bool gDictUnlockWritten = false;
+static float gHitBase = -1;
+static float gHitWritten = -1;
 
 static void pm_apply_static_settings(void) {
     if (!PMIl2CppReady) return;
@@ -741,39 +770,35 @@ static void pm_apply_static_settings(void) {
         }
     }
 
-    // 皮肤 / 故事 / 词典（称号、背景等）本地全解锁
-    bool coll = __atomic_load_n(&PMUnlockCollection, __ATOMIC_RELAXED);
-    if (coll != gCollectionUnlockWritten) {
-        bool ok1 = pm_set_static_bool("SkinUnlockStorage", "UnlockAll", coll);
-        bool ok2 = pm_set_static_bool("StoryUnlockStorage", "UnlockAll", coll);
-        bool ok3 = pm_set_static_bool("DictStorage", "UnlockAll", coll);
-        PMLog(@"内容解锁: skin=%d story=%d dict=%d -> %d", ok1, ok2, ok3, coll);
-        if (ok1 || ok2 || ok3) gCollectionUnlockWritten = coll;
+    // 皮肤 / 故事 / 词典（背景等）本地全解锁
+    bool skins = PMUnlockSkins;
+    if (skins != gSkinUnlockWritten) {
+        if (pm_set_static_bool("SkinUnlockStorage", "UnlockAll", skins)) gSkinUnlockWritten = skins;
+    }
+    bool stories = PMUnlockStories;
+    if (stories != gStoryUnlockWritten) {
+        if (pm_set_static_bool("StoryUnlockStorage", "UnlockAll", stories)) gStoryUnlockWritten = stories;
+    }
+    bool dict = PMUnlockBackgrounds;
+    if (dict != gDictUnlockWritten) {
+        if (pm_set_static_bool("DictStorage", "UnlockAll", dict)) gDictUnlockWritten = dict;
     }
 
-    float speed = PMSpeed;
-    if (speed < 0.5f) speed = 0.5f;
-    if (speed > 2.5f) speed = 2.5f;
-    bool overridden = fabsf(speed - 1.0f) > 0.01f;
-    if (overridden) {
-        if (!gHiSpeedCaptured) {
-            Il2CppClass *k = pm_find_class("Chart");
-            if (k) {
-                FieldInfo *f = il2cpp_class_get_field_from_name(k, "hiSpeedMultiplier");
-                if (f) {
-                    float cur = 0;
-                    il2cpp_field_static_get_value(f, &cur);
-                    if (cur > 0.05f && cur < 20.0f) gOrigHiSpeed = cur;
-                    gHiSpeedCaptured = true;
-                }
+    // 打击音量：最大 150%
+    if (PMHitVolumeBoost > 1.005f) {
+        float cur = 0;
+        if (pm_get_static_float("SEPlayer", "hitSoundVolume", &cur)) {
+            if (fabsf(cur - gHitWritten) > 0.0005f) gHitBase = cur;   // 游戏刚写过设置
+            if (gHitBase < 0) gHitBase = cur;
+            float target = gHitBase * PMHitVolumeBoost;
+            if (target > 1.5f) target = 1.5f;
+            if (fabsf(cur - target) > 0.0005f) {
+                if (pm_set_static_float("SEPlayer", "hitSoundVolume", target)) gHitWritten = target;
             }
         }
-        if (pm_set_static_float("Chart", "hiSpeedMultiplier", speed)) {
-            gHiSpeedOverridden = true;
-        }
-    } else if (gHiSpeedOverridden) {
-        pm_set_static_float("Chart", "hiSpeedMultiplier", gOrigHiSpeed);
-        gHiSpeedOverridden = false;
+    } else if (gHitWritten > 0) {
+        if (gHitBase >= 0) pm_set_static_float("SEPlayer", "hitSoundVolume", gHitBase);
+        gHitWritten = -1;
     }
 }
 

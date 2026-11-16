@@ -16,6 +16,14 @@ typedef NS_ENUM(NSInteger, PMRowTag) {
     PMRowBlockUpload,
     PMRowProfileOn,
     PMRowBallShow,
+    PMRowUnlockCharacter,
+    PMRowUnlockSkin,
+    PMRowUnlockRelic,
+    PMRowUnlockStory,
+    PMRowUnlockTitle,
+    PMRowUnlockBg,
+    PMRowUnlockChallenge,
+    PMRowAutoHide,
 };
 
 @interface PMSettingsController : UIViewController
@@ -379,18 +387,29 @@ static UIWindowScene *pm_active_scene(void) {
     [self toggleRow:@"全 Perfect" detail:@"Good / Miss 强制按 Perfect 结算"
                 tag:PMRowAllPerfect on:PMAllPerfect];
     [self toggleRow:@"锁血" detail:@"Miss 不掉血" tag:PMRowLockHP on:PMLockHP];
-
-    [self section:@"速度"];
-    [self sliderRow:@"谱面速度倍率" value:PMSpeed min:0.5 max:2.0 action:@selector(onSpeed:)];
 }
 
 // ------------------------------ 解锁 ------------------------------
 - (void)buildUnlock {
     [self section:@"本地解锁（不写存档 / 不上传）"];
-    [self toggleRow:@"全曲 / 全难度" detail:@"写入 TrackUnlockStorage.UnlockAll"
+    [self toggleRow:@"全部解锁" detail:@"一键开启下面所有项"
+                tag:PMRowUnlockCollection on:PMUnlockCollection];
+    [self toggleRow:@"全曲 / 全难度" detail:@"TrackUnlockStorage.UnlockAll"
                 tag:PMRowUnlockAll on:PMUnlockAll];
-    [self toggleRow:@"角色 / 皮肤 / 收藏 / 故事 / 称号 / 背景 / 挑战"
-             detail:@"本地把各类 IsUnlocked 判为 true" tag:PMRowUnlockCollection on:PMUnlockCollection];
+    [self toggleRow:@"角色" detail:@"IsCharacterUnlocked 本地放行"
+                tag:PMRowUnlockCharacter on:PMUnlockCharacters];
+    [self toggleRow:@"皮肤" detail:@"SkinUnlockStorage.UnlockAll"
+                tag:PMRowUnlockSkin on:PMUnlockSkins];
+    [self toggleRow:@"收藏品" detail:@"IsRelicUnlocked 本地放行"
+                tag:PMRowUnlockRelic on:PMUnlockRelics];
+    [self toggleRow:@"故事" detail:@"StoryUnlockStorage.UnlockAll"
+                tag:PMRowUnlockStory on:PMUnlockStories];
+    [self toggleRow:@"称号" detail:@"IsAchievementUnlocked 本地放行"
+                tag:PMRowUnlockTitle on:PMUnlockTitles];
+    [self toggleRow:@"背景" detail:@"DictStorage.UnlockAll + 成就背景放行"
+                tag:PMRowUnlockBg on:PMUnlockBackgrounds];
+    [self toggleRow:@"挑战" detail:@"IsChallengeUnlocked 本地放行"
+                tag:PMRowUnlockChallenge on:PMUnlockChallenges];
     [self toggleRow:@"付费曲包（本地）" detail:@"仅本地把 IsPurchased 判为 true"
                 tag:PMRowPaidUnlock on:PMPaidUnlock];
 
@@ -437,15 +456,21 @@ static UIWindowScene *pm_active_scene(void) {
     [self section:@"悬浮球"];
     [self toggleRow:@"显示悬浮球" detail:@"关闭后隐藏，可在屏幕右缘小圆点重新呼出"
                 tag:PMRowBallShow on:PMBallVisible];
+    [self toggleRow:@"游玩时自动隐藏" detail:@"进入打歌界面自动收起，避免误触"
+                tag:PMRowAutoHide on:PMAutoHideInGame];
     [self sliderRow:@"悬浮球透明度" value:PMBallAlpha min:0.2 max:1.0 action:@selector(onBallAlpha:)];
 
     UILabel *tip = [[UILabel alloc] initWithFrame:CGRectMake(22, _y, self.view.bounds.size.width - 44, 40)];
-    tip.text = @"悬浮球可拖动；隐藏后轻触屏幕右边缘中部的小圆点即可再次打开设置。";
+    tip.text = @"悬浮球可拖动；隐藏后轻触屏幕右边缘中部的小圆点即可再次打开设置。游玩时会自动收起。";
     tip.font = [UIFont systemFontOfSize:11];
     tip.textColor = [UIColor colorWithWhite:1 alpha:0.4];
     tip.numberOfLines = 2;
     [_scroll addSubview:tip];
     _y += 46;
+
+    [self section:@"声音"];
+    [self sliderRow:[NSString stringWithFormat:@"打击音量 %.0f%%", PMHitVolumeBoost * 100]
+              value:PMHitVolumeBoost min:1.0 max:1.5 action:@selector(onHitBoost:)];
 }
 
 // ------------------------------ 诊断 ------------------------------
@@ -511,6 +536,7 @@ static UIWindowScene *pm_active_scene(void) {
     t.text = title;
     t.font = [UIFont systemFontOfSize:14];
     t.textColor = UIColor.whiteColor;
+    t.tag = 9102;
     [card addSubview:t];
 
     UILabel *v = [[UILabel alloc] initWithFrame:CGRectMake(w - 96, 8, 80, 20)];
@@ -593,25 +619,53 @@ static UIWindowScene *pm_active_scene(void) {
         case PMRowLockHP: PMLockHP = on; break;
         case PMRowUnlockAll: PMUnlockAll = on; break;
         case PMRowPaidUnlock: PMPaidUnlock = on; break;
-        case PMRowUnlockCollection: PMUnlockCollection = on; break;
+        case PMRowUnlockCollection:
+            PMUnlockCollection = on;
+            PMUnlockCharacters = on;
+            PMUnlockSkins = on;
+            PMUnlockRelics = on;
+            PMUnlockStories = on;
+            PMUnlockTitles = on;
+            PMUnlockBackgrounds = on;
+            PMUnlockChallenges = on;
+            [self rebuild];
+            break;
+        case PMRowUnlockCharacter: PMUnlockCharacters = on; break;
+        case PMRowUnlockSkin: PMUnlockSkins = on; break;
+        case PMRowUnlockRelic: PMUnlockRelics = on; break;
+        case PMRowUnlockStory: PMUnlockStories = on; break;
+        case PMRowUnlockTitle: PMUnlockTitles = on; break;
+        case PMRowUnlockBg: PMUnlockBackgrounds = on; break;
+        case PMRowUnlockChallenge: PMUnlockChallenges = on; break;
         case PMRowBlockUpload: PMBlockUpload = on; break;
         case PMRowProfileOn: PMProfileEnabled = on; break;
+        case PMRowAutoHide:
+            PMAutoHideInGame = on;
+            PMUpdateBall();
+            break;
         case PMRowBallShow:
             PMBallVisible = on;
             PMUpdateBall();
             break;
         default: break;
     }
+    if (sender.tag >= PMRowUnlockCharacter && sender.tag <= PMRowUnlockChallenge) {
+        PMUnlockCollection = PMUnlockCharacters && PMUnlockSkins && PMUnlockRelics &&
+                             PMUnlockStories && PMUnlockTitles && PMUnlockBackgrounds &&
+                             PMUnlockChallenges;
+    }
     [self persist];
     PMApplySettingsNow();
 }
 
-- (void)onSpeed:(UISlider *)sl {
+- (void)onHitBoost:(UISlider *)sl {
     float v = sl.value;
-    if (fabsf(v - 1.0f) < 0.04f) v = 1.0f;
-    PMSpeed = v;
+    if (v < 1.005f) v = 1.0f;
+    PMHitVolumeBoost = v;
     UILabel *lab = [self.view viewWithTag:9001];
     lab.text = [NSString stringWithFormat:@"%.2f", v];
+    UILabel *title = [sl.superview viewWithTag:9102];
+    title.text = [NSString stringWithFormat:@"打击音量 %.0f%%", v * 100];
     [self persist];
     PMApplySettingsNow();
 }
@@ -659,11 +713,19 @@ static UIWindowScene *pm_active_scene(void) {
     [d setBool:PMUnlockAll forKey:@"pm.unlock"];
     [d setBool:PMPaidUnlock forKey:@"pm.paid"];
     [d setBool:PMUnlockCollection forKey:@"pm.coll"];
+    [d setBool:PMUnlockCharacters forKey:@"pm.coll.char"];
+    [d setBool:PMUnlockSkins forKey:@"pm.coll.skin"];
+    [d setBool:PMUnlockRelics forKey:@"pm.coll.relic"];
+    [d setBool:PMUnlockStories forKey:@"pm.coll.story"];
+    [d setBool:PMUnlockTitles forKey:@"pm.coll.title"];
+    [d setBool:PMUnlockBackgrounds forKey:@"pm.coll.bg"];
+    [d setBool:PMUnlockChallenges forKey:@"pm.coll.challenge"];
     [d setBool:PMBlockUpload forKey:@"pm.block"];
-    [d setFloat:PMSpeed forKey:@"pm.speed"];
     [d setBool:PMProfileEnabled forKey:@"pm.profile.on"];
     [d setBool:PMBallVisible forKey:@"pm.ball.show"];
+    [d setBool:PMAutoHideInGame forKey:@"pm.ball.auto"];
     [d setFloat:PMBallAlpha forKey:@"pm.ball.alpha"];
+    [d setFloat:PMHitVolumeBoost forKey:@"pm.hitvol"];
 }
 
 - (void)refreshStatus {
@@ -795,6 +857,21 @@ static void pm_open_panel(void) {
     });
 }
 
+static int gBallMode = -1;   // -1 未渲染, 0 隐藏, 1 悬浮球, 2 边缘小点
+
+@interface PMBallTicker : NSObject
+@end
+
+static BOOL pm_in_gameplay(void) {
+    return (CFAbsoluteTimeGetCurrent() - PMLastGameplayTick) < 2.0;
+}
+
+static int pm_desired_ball_mode(void) {
+    BOOL autoHide = PMAutoHideInGame && pm_in_gameplay();
+    if (autoHide) return 0;
+    return PMBallVisible ? 1 : 2;
+}
+
 void PMUpdateBall(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!gBallWindow) return;
@@ -802,35 +879,49 @@ void PMUpdateBall(void) {
         for (UIView *v in host.subviews) [v removeFromSuperview];
         host.backgroundColor = UIColor.clearColor;
 
+        int mode = pm_desired_ball_mode();
+        gBallMode = mode;
+        if (mode == 0) {
+            gBallWindow.hidden = YES;
+            return;
+        }
+
         UIWindowScene *scene = pm_active_scene();
         CGRect sb = scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
-        if (PMBallVisible) {
+        if (mode == 1) {
             CGFloat side = 56;
             NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
             CGFloat x = [d objectForKey:@"pm.ball.x"] ? [d floatForKey:@"pm.ball.x"] : 24;
-            CGFloat y = [d objectForKey:@"pm.ball.y"] ? [d floatForKey:@"pm.ball.y"] : 120;
+            CGFloat y = [d objectForKey:@"pm.ball.y"] ? [d floatForKey:@"pm.ball.y"] : 64;
             x = MAX(0, MIN(sb.size.width - side, x));
             y = MAX(24, MIN(sb.size.height - side - 24, y));
             gBallWindow.frame = CGRectMake(x, y, side, side);
             PMBallView *ball = [[PMBallView alloc] initWithFrame:CGRectMake(0, 0, side, side)];
             ball.alpha = MAX(0.2f, MIN(1.0f, PMBallAlpha));
-            [gBallWindow.rootViewController.view addSubview:ball];
+            [host addSubview:ball];
         } else {
-            CGFloat side = 44;
+            CGFloat side = 32;
             gBallWindow.frame = CGRectMake(sb.size.width - side, sb.size.height / 2 - side / 2, side, side);
             PMEdgeDotView *dot = [[PMEdgeDotView alloc] initWithFrame:CGRectMake(0, 0, side, side)];
-            [gBallWindow.rootViewController.view addSubview:dot];
+            [host addSubview:dot];
         }
         gBallWindow.hidden = NO;
     });
 }
 
+// 游玩时自动收起悬浮球 / 小点，避免误触
+static void pm_ball_tick(void) {
+    if (!gBallWindow) return;
+    if (gBallMode != pm_desired_ball_mode()) PMUpdateBall();
+}
+
 void PMShowOverlay(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        static BOOL timerStarted = NO;
         if (!gBallWindow) {
             UIWindowScene *scene = pm_active_scene();
             gBallWindow = scene ? [[UIWindow alloc] initWithWindowScene:scene]
-                                : [[UIWindow alloc] initWithFrame:CGRectMake(24, 120, 56, 56)];
+                                : [[UIWindow alloc] initWithFrame:CGRectMake(24, 64, 56, 56)];
             gBallWindow.windowLevel = UIWindowLevelAlert + 1;
             gBallWindow.backgroundColor = UIColor.clearColor;
             UIViewController *root = [UIViewController new];
@@ -839,5 +930,14 @@ void PMShowOverlay(void) {
             PMLog(@"悬浮球已创建");
         }
         PMUpdateBall();
+        if (!timerStarted) {
+            timerStarted = YES;
+            [NSTimer scheduledTimerWithTimeInterval:1.0 target:[PMBallTicker class]
+                                           selector:@selector(tick) userInfo:nil repeats:YES];
+        }
     });
 }
+
+@implementation PMBallTicker
++ (void)tick { pm_ball_tick(); }
+@end
