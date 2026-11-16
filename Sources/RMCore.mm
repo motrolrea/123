@@ -308,6 +308,7 @@ static Il2CppDomain *(*il2cpp_thread_attach)(Il2CppDomain *);
 static Il2CppString *(*il2cpp_string_new)(const char *);
 static Il2CppType *(*il2cpp_class_get_type)(Il2CppClass *);
 static Il2CppObject *(*il2cpp_type_get_object)(const Il2CppType *);
+static void (*il2cpp_runtime_class_init)(Il2CppClass *);
 static uint32_t (*il2cpp_gchandle_new)(Il2CppObject *, bool);
 static void (*il2cpp_gchandle_free)(uint32_t);
 
@@ -332,6 +333,7 @@ static bool rm_resolve_il2cpp(void) {
     RESOLVE(il2cpp_string_new, "il2cpp_string_new");
     il2cpp_class_get_type = (__typeof__(il2cpp_class_get_type))dlsym(h, "il2cpp_class_get_type");
     il2cpp_type_get_object = (__typeof__(il2cpp_type_get_object))dlsym(h, "il2cpp_type_get_object");
+    il2cpp_runtime_class_init = (__typeof__(il2cpp_runtime_class_init))dlsym(h, "il2cpp_runtime_class_init");
     il2cpp_gchandle_new = (__typeof__(il2cpp_gchandle_new))dlsym(h, "il2cpp_gchandle_new");
     il2cpp_gchandle_free = (__typeof__(il2cpp_gchandle_free))dlsym(h, "il2cpp_gchandle_free");
 #undef RESOLVE
@@ -413,6 +415,10 @@ static void rm_setup_classes(void) {
     gSelectClass = rm_find_class_any("LevelSelectControl");
     gObjectClass = rm_find_class_ns("UnityEngine", "Object");
 
+    if (il2cpp_runtime_class_init && gPaymentClass) {
+        il2cpp_runtime_class_init(gPaymentClass);
+    }
+
     if (gObjectClass) {
         gFindTypeM2 = il2cpp_class_get_method_from_name(gObjectClass, "FindObjectOfType", 2);
         if (!gFindTypeM2) {
@@ -492,14 +498,17 @@ static bool rm_call_static_bool(Il2CppClass *k, const char *setter, bool value) 
     if (!m) return false;
     uint8_t v = value ? 1 : 0;
     void *args[1] = {&v};
-    il2cpp_runtime_invoke(m, NULL, args, NULL);
-    return true;
+    Il2CppException *exc = NULL;
+    il2cpp_runtime_invoke(m, NULL, args, &exc);
+    return exc == NULL;
 }
 
 static void rm_call_static_void(Il2CppClass *k, const char *method) {
     if (!k) return;
     const MethodInfo *m = il2cpp_class_get_method_from_name(k, method, 0);
-    if (m) il2cpp_runtime_invoke(m, NULL, NULL, NULL);
+    if (!m) return;
+    Il2CppException *exc = NULL;
+    il2cpp_runtime_invoke(m, NULL, NULL, &exc);
 }
 
 static bool rm_boxed_bool(Il2CppObject *o) {
@@ -526,7 +535,8 @@ static void rm_list_add(void *list, Il2CppString *value) {
     const MethodInfo *m = il2cpp_class_get_method_from_name(k, "Add", 1);
     if (!m) return;
     void *args[1] = {value};
-    il2cpp_runtime_invoke(m, list, args, NULL);
+    Il2CppException *exc = NULL;
+    il2cpp_runtime_invoke(m, list, args, &exc);
 }
 
 static void rm_hashset_add(void *set, Il2CppString *value) {
@@ -536,7 +546,8 @@ static void rm_hashset_add(void *set, Il2CppString *value) {
     const MethodInfo *m = il2cpp_class_get_method_from_name(k, "Add", 1);
     if (!m) return;
     void *args[1] = {value};
-    il2cpp_runtime_invoke(m, set, args, NULL);
+    Il2CppException *exc = NULL;
+    il2cpp_runtime_invoke(m, set, args, &exc);
 }
 
 // ---------------------------------------------------------------------------

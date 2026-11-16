@@ -63,11 +63,18 @@ def zip_tree(root: Path, output: Path) -> None:
         for path in sorted(root.rglob("*")):
             if not path.is_file():
                 continue
-            name = path.relative_to(root).as_posix()
+            rel = path.relative_to(root)
+            name = rel.as_posix()
+            # Windows 解包会丢失 Unix 执行位：.app / .framework 内的文件统一给 0755
+            executable = (
+                path.suffix == ".dylib"
+                or rel.parent.name.endswith(".framework")
+                or rel.parent.name.endswith(".app")
+            )
             entry = zipfile.ZipInfo.from_file(path, name)
             entry.create_system = 3
             entry.compress_type = zipfile.ZIP_DEFLATED
-            entry.external_attr = (0o100755 if path.stat().st_mode & 0o111 else 0o100644) << 16
+            entry.external_attr = (0o100755 if executable else 0o100644) << 16
             with path.open("rb") as src, archive.open(entry, "w", force_zip64=True) as dst:
                 shutil.copyfileobj(src, dst, 1024 * 1024)
 
