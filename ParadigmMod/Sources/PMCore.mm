@@ -782,6 +782,8 @@ static void pm_set_text_at_ex(void *self, size_t off, NSString *key, BOOL unlock
     pm_set_component_text(comp, v);
 }
 
+static void *pm_call_obj(void *obj, const char *name, int argc, void **args);
+
 static void pm_apply_collection_overrides(void *self) {
     if (!self) return;
     BOOL anyUnlock = PMUnlockCharacters || PMUnlockSkins || PMUnlockStories ||
