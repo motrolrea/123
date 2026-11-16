@@ -133,8 +133,21 @@ static const size_t kOff_JS_Slots = 0x10;
 static const size_t kOff_JS_Time = 0x60;
 static const size_t kOff_Slot_Result = 0x10;
 static const size_t kOff_Slot_PerfectTime = 0x18;
+// List<T> 内部：_items 在 0x10（指向 T[] 数组对象），_size 在 0x18；
+// 数组元素区在数组对象的 +0x20。
 static const size_t kOff_List_Items = 0x10;
 static const size_t kOff_List_Size = 0x18;
+static const size_t kOff_Array_Elements = 0x20;
+
+// 返回 List 的元素起始指针与元素个数；非法时返回 NULL
+static void **pm_list_items(void *list, int *outSize) {
+    if (!list) return NULL;
+    void *arr = *(void **)((char *)list + kOff_List_Items);
+    int size = *(int *)((char *)list + kOff_List_Size);
+    if (!arr || size <= 0 || size > 200000) return NULL;
+    if (outSize) *outSize = size;
+    return (void **)((char *)arr + kOff_Array_Elements);
+}
 
 static const int kJudgeUninitialized = 0;
 static const int kJudgeUnjudge = 1;
@@ -593,10 +606,10 @@ static void pm_UpdateTime_hook(void *self) {
 
     void *slots = *(void **)((char *)self + kOff_JS_Slots);
     if (!slots) return;
-    void **items = *(void ***)((char *)slots + kOff_List_Items);
-    int size = *(int *)((char *)slots + kOff_List_Size);
+    int size = 0;
+    void **items = pm_list_items(slots, &size);
+    if (!items) return;
     float now = *(float *)((char *)self + kOff_JS_Time);
-    if (!items || size <= 0 || size > 100000) return;
 
     for (int i = 0; i < size; i++) {
         void *slot = items[i];
@@ -783,6 +796,8 @@ static void pm_set_text_at_ex(void *self, size_t off, NSString *key, BOOL unlock
 }
 
 static void *pm_call_obj(void *obj, const char *name, int argc, void **args);
+static Il2CppClass *pm_class_any_ns(const char *name, const char *ns);
+static void pm_call_static_void(const char *klassName, const char *methodName);
 
 static void pm_apply_collection_overrides(void *self) {
     if (!self) return;
@@ -810,17 +825,15 @@ static void pm_apply_collection_overrides(void *self) {
 }
 
 static void pm_apply_playerinfo_overrides(void *self) {
-    if (!PMProfileEnabled || !self) return;
+    if (!self) return;
     pm_set_text_at(self, kOff_PI_Level, @"level");
     NSString *rv = PMProfileValue(@"rating");
     if (rv.length) {
-        // 左上角的「8.51」是 savedRating / 100，图标也按这个值分级：
-        // 直接改内部 rating，再调用官方刷新，数字和图标一起变。
+        // 左上角的「8.51」来自 savedRating / 100，评分图标也按同一阈值分级，
+        // 所以直接改内部值再调官方刷新，数字和图标才会一起变。
         int32_t rating100 = (int32_t)lround(rv.doubleValue * 100.0);
-        static int32_t appliedRating = -99999;
-        if (rating100 != appliedRating) {
+        if (*(int32_t *)((char *)self + kOff_PI_SavedRating) != rating100) {
             *(int32_t *)((char *)self + kOff_PI_SavedRating) = rating100;
-            appliedRating = rating100;
             pm_call_obj(self, "UpdateRatingDisplayOnSceneLoad", 0, NULL);
             PMLog(@"主界面评分已设为 %.2f（图标同步刷新）", rating100 / 100.0);
         }
@@ -880,6 +893,62 @@ static bool gStoryUnlockWritten = false;
 static bool gDictUnlockWritten = false;
 static float gHitBase = -1;
 static float gHitWritten = -1;
+static bool gSkinRecordsDone = false;
+
+// 往游戏本地 KVDB 写一条记录（Upsert(string, object)）
+static void pm_kvdb_upsert_int(const char *key, int val) {
+    static Il2CppClass *kvdb = NULL;
+    static Il2CppClass *i32 = NULL;
+    static const MethodInfo *mUp = NULL;
+    if (!kvdb) kvdb = pm_find_class("KVDB");
+    if (!i32) i32 = pm_class_any_ns("Int32", "System");
+    if (!kvdb || !i32 || !il2cpp_object_new || !il2cpp_runtime_invoke) return;
+    if (!mUp) mUp = il2cpp_class_get_method_from_name(kvdb, "Upsert", 2);
+    if (!mUp) return;
+    Il2CppObject *boxed = il2cpp_object_new(i32);
+    Il2CppString *k = il2cpp_string_new(key);
+    if (!boxed || !k) return;
+    *(int *)((char *)boxed + 0x10) = val;      // 装箱的 int 值在 +0x10
+    void *args[2] = {k, boxed};
+    il2cpp_runtime_invoke(mUp, NULL, args, NULL);
+}
+
+// 角色解锁判定走 SkinUnlockStorage.GetAll()（KVDB 键 /skinunlock/<皮肤名>），
+// 只设 UnlockAll 不写记录的话角色列表仍然只有几个，所以这里把每条皮肤记录写进去。
+static void pm_write_all_skin_records(void) {
+    if (gSkinRecordsDone) return;
+    Il2CppClass *smCls = pm_find_class("SkinManager");
+    if (!smCls) return;
+    FieldInfo *fInst = il2cpp_class_get_field_from_name(smCls, "instance");
+    if (!fInst) return;
+    void *inst = NULL;
+    il2cpp_field_static_get_value(fInst, &inst);
+    if ((uintptr_t)inst < 0x100000000ULL) return;
+    void *skins = *(void **)((char *)inst + 0x20);
+    int n = 0;
+    void **items = pm_list_items(skins, &n);
+    if (!items || n <= 0) return;
+
+    char key[256];
+    int written = 0;
+    for (int i = 0; i < n; i++) {
+        void *skin = items[i];
+        if ((uintptr_t)skin < 0x100000000ULL) continue;
+        void *nameObj = *(void **)((char *)skin + 0x10);
+        char name[192] = {0};
+        pm_il2cpp_string_ascii(nameObj, name, sizeof(name));
+        if (!name[0] || strlen(name) > 150) continue;
+        snprintf(key, sizeof(key), "/skinunlock/%s", name);
+        pm_kvdb_upsert_int(key, 1);
+        written++;
+    }
+    if (written > 0) {
+        pm_call_static_void("KVDB", "Bump");
+        pm_call_static_void("PlayerHelper", "AutoSkinUnlockInvariance");
+        gSkinRecordsDone = true;
+        PMLog(@"已写入 %d 条皮肤解锁记录（本地 KVDB）", written);
+    }
+}
 
 static void pm_apply_static_settings(void) {
     if (!PMIl2CppReady) return;
@@ -900,12 +969,16 @@ static void pm_apply_static_settings(void) {
             gSkinUnlockWritten = skins;
             gSkinFailLogged = false;
             PMLog(@"皮肤全解锁 = %d", skins);
-            if (skins) pm_call_static_void("PlayerHelper", "AutoSkinUnlockInvariance");
+            if (skins) {
+                pm_call_static_void("PlayerHelper", "AutoSkinUnlockInvariance");
+                pm_write_all_skin_records();
+            }
         } else if (!gSkinFailLogged) {
             PMLog(@"写入 SkinUnlockStorage.UnlockAll 失败");
             gSkinFailLogged = true;
         }
     }
+    if (skins) pm_write_all_skin_records();   // 失败会在下次重试
     bool stories = PMUnlockStories || PMUnlockCollection;
     if (stories != gStoryUnlockWritten) {
         if (pm_set_static_bool("StoryUnlockStorage", "UnlockAll", stories)) {
@@ -1239,10 +1312,9 @@ static int pm_tab_cells(void *tab, void ***outItems) {
     void *cells = *(void **)((char *)tab + 0x28);
     if (!cells) return 0;
     if (!pm_ptr_ok(cells)) return -1;
-    int cn = *(int *)((char *)cells + 0x18);
-    if (cn <= 0 || cn > 5000) return 0;
-    void **items = *(void ***)((char *)cells + 0x10);
-    if (!pm_ptr_ok(items)) return 0;
+    int cn = 0;
+    void **items = pm_list_items(cells, &cn);
+    if (!items) return 0;
     if (outItems) *outItems = items;
     return cn;
 }
@@ -1371,9 +1443,9 @@ static BOOL pm_build_mod_tab(void *gsp) {
         PMLog(@"Mod页: 面板字段异常 gsp=%p tabs=%p pages=%p", gsp, tabs, pages);
         return NO;
     }
-    int tn = *(int *)((char *)tabs + 0x18);
-    void **titems = *(void ***)((char *)tabs + 0x10);
-    if (tn <= 0 || tn > 200 || !pm_ptr_ok(titems)) {
+    int tn = 0;
+    void **titems = pm_list_items(tabs, &tn);
+    if (!titems || tn > 200) {
         PMLog(@"Mod页: tabs 数量异常 %d items=%p", tn, titems);
         return NO;
     }
@@ -1536,6 +1608,21 @@ static int pm_pref_int(const char *key, int def) {
     return *(int *)((char *)boxed + 0x10);
 }
 
+// 只有官方设置项真的写过这个键时才同步，避免用默认值把已保存的开关冲掉
+static BOOL pm_pref_has_key(const char *key) {
+    static const MethodInfo *mHas = NULL;
+    if (!mHas) {
+        Il2CppClass *pp = pm_class_in_namespace("PlayerPrefs", "UnityEngine", "HasKey", 1);
+        if (pp) mHas = il2cpp_class_get_method_from_name(pp, "HasKey", 1);
+        if (!mHas) return NO;
+    }
+    Il2CppString *s = il2cpp_string_new(key);
+    void *args[1] = {s};
+    Il2CppObject *boxed = il2cpp_runtime_invoke(mHas, NULL, args, NULL);
+    if (!boxed) return NO;
+    return *(uint8_t *)((char *)boxed + 0x10) != 0;
+}
+
 static void pm_sync_prefs(void) {
     if (!gPrefGetIntM) {
         Il2CppClass *pp = pm_class_in_namespace("PlayerPrefs", "UnityEngine", "GetInt", 2);
@@ -1566,6 +1653,7 @@ static void pm_sync_prefs(void) {
     BOOL ballChanged = NO;
     int n = (int)(sizeof(map) / sizeof(map[0]));
     for (int i = 0; i < n; i++) {
+        if (!pm_pref_has_key(map[i].key)) continue;   // 没被官方设置写过就保持原值
         int v = pm_pref_int(map[i].key, map[i].def);
         if (v == map[i].last) continue;
         map[i].last = v;
@@ -1686,10 +1774,10 @@ static void pm_runtime_tick(void) {
         if (!gSetResultMethod) pm_prepare_judge_api();
         void *slots = *(void **)((char *)js + kOff_JS_Slots);
         if (slots && gSetResultMethod) {
-            void **items = *(void ***)((char *)slots + kOff_List_Items);
-            int size = *(int *)((char *)slots + kOff_List_Size);
+            int size = 0;
+            void **items = pm_list_items(slots, &size);
             float t = *(float *)((char *)js + kOff_JS_Time);
-            if (items && size > 0 && size < 100000) {
+            if (items) {
                 PMLastSlotCount = size;
                 for (int i = 0; i < size; i++) {
                     void *slot = items[i];
