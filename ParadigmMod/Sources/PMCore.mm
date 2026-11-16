@@ -1,3 +1,4 @@
+#define _XOPEN_SOURCE 700
 //
 //  ParadigmMod —— 《范式：起源》iOS 4.13 注入型 mod 核心
 //  适用于已解密（cryptid=0）的 UnityFramework + 未签名 / TrollStore 安装环境
