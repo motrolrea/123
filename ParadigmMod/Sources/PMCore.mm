@@ -1507,7 +1507,10 @@ static void pm_go_set_active(void *go, bool active) {
 // 构建「Mod设置」页：克隆一个官方页做模板，再通过官方 Add() 注册 Tab
 static BOOL pm_build_mod_tab(void *gsp) {
     static void *patchedGsp = NULL;
+    static int attempts = 0;
     if (!gsp || !gFindTypesHost || !il2cpp_object_new || !il2cpp_array_new) return NO;
+    if (attempts >= 3) return YES;   // 已经试过几次，别无限重试刷垃圾对象
+    attempts++;
     if (pm_panel_score(gsp) <= 0) {
         void *better = pm_find_better_panel(gsp);
         if (better) {
@@ -1611,23 +1614,38 @@ static BOOL pm_build_mod_tab(void *gsp) {
         tabChildren = pm_child_count(tabParent);
     }
 
-    // 页面容器同理：viewPages 只记录已启用的页，第 pn 个子物体才是我们要的新页
-    guard = 0;
-    while (viewChildren <= pn && guard++ < 8) {
+    // 页面：优先克隆官方页面原型 viewProto（官方建页就是这么做的，
+    // 里面只有 cell 原型、没有已生成的实例行），失败再退回克隆一个已注册页。
+    void *clonedPage = NULL;
+    if (pm_ptr_ok(viewProto)) {
         void *protoGO = pm_call_obj(viewProto, "get_gameObject", 0, NULL);
         void *ia[3] = {protoGO, viewParent, &gInstInWorld};
         Il2CppException *ex = NULL;
-        il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
-        if (ex) { PMLog(@"Mod页: 克隆设置页失败 exc=%p", ex); break; }
-        viewChildren = pm_child_count(viewParent);
+        clonedPage = il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
+        if (ex || !clonedPage) {
+            PMLog(@"Mod页: 克隆页面原型失败 exc=%p", ex);
+            clonedPage = NULL;
+        }
     }
-    if (viewChildren <= pn) {
-        PMLog(@"Mod页: 页面容器子物体不足 %d <= %d", viewChildren, pn);
-        return NO;
+    if (!clonedPage) {
+        int pn2 = 0;
+        void **pv = pm_list_items(pages, &pn2);
+        void *srcPageTr = (pv && pn2 > 0) ? pv[0] : NULL;
+        void *srcPageGO = srcPageTr ? pm_call_obj(srcPageTr, "get_gameObject", 0, NULL) : NULL;
+        if (pm_ptr_ok(srcPageGO)) {
+            void *ia[3] = {srcPageGO, viewParent, &gInstInWorld};
+            Il2CppException *ex = NULL;
+            clonedPage = il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
+            if (ex || !clonedPage) {
+                PMLog(@"Mod页: 克隆官方页失败 exc=%p", ex);
+                clonedPage = NULL;
+            }
+        }
     }
-    void *pageTr = pm_get_child(viewParent, pn);
-    void *page = pageTr ? pm_call_obj(pageTr, "get_gameObject", 0, NULL) : NULL;
-    if (!pm_ptr_ok(page)) {
+    if (!clonedPage) return NO;
+    void *pageTr = pm_call_obj(clonedPage, "get_transform", 0, NULL);
+    void *page = clonedPage;
+    if (!pm_ptr_ok(pageTr)) {
         PMLog(@"Mod页: 取新页失败 page=%p", page);
         return NO;
     }
@@ -1687,12 +1705,16 @@ static BOOL pm_build_mod_tab(void *gsp) {
     Il2CppClass *gspCls = il2cpp_object_get_class((Il2CppObject *)gsp);
     const MethodInfo *mGspAdd = gspCls ? il2cpp_class_get_method_from_name(gspCls, "Add", 2) : NULL;
     if (mGspAdd) il2cpp_runtime_invoke(mGspAdd, gsp, aargs, &aexc);
-    if (aexc) PMLog(@"Mod页: 官方 Add 抛出托管异常（Tab 模板可能不足）");
+    if (aexc) {
+        PMLog(@"Mod页: 官方 Add 抛出托管异常，本次放弃");
+        return NO;
+    }
     pm_go_set_active((void *)page, false);   // 保持原来的分页状态，等用户点侧栏
 
     patchedGsp = gsp;
     gModPageGO = (void *)page;
-    PMLog(@"Mod设置页已注册: page=%d, 行数=%d, 标题类=%s, 选项类=%s", pageIndex, made,
+    PMLog(@"Mod设置页已注册: page=%d, 行数=%d, 页内子物体=%d, 标题类=%s, 选项类=%s",
+          pageIndex, made, pm_child_count(pageTr),
           gTitleCellClass ? "TitleCell" : "无", "ChoiceCell");
     return YES;
 }
