@@ -30,6 +30,7 @@ COMMON=(
   -framework Foundation
   -framework UIKit
   -framework CoreGraphics
+  -framework QuartzCore
 )
 
 # 1) framework 形式（LC_LOAD_DYLIB 指向 @loader_path/../ParadigmMod.framework/ParadigmMod）
