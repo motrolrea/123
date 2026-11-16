@@ -261,6 +261,10 @@ void PMLogInstallCrashHandler(void) {
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGTRAP, &sa, NULL);
     sigaction(SIGABRT, &sa, NULL);
+    Dl_info dli;
+    if (dladdr((void *)&pm_signal_handler, &dli) && dli.dli_fbase) {
+        PMLog(@"本模块 base=%p, main base=%p", dli.dli_fbase, _dyld_get_image_header(0));
+    }
     PMLog(@"日志文件: %@", PMLogPath());
 }
 
@@ -453,6 +457,8 @@ static size_t (*il2cpp_image_get_class_count)(const Il2CppImage *);
 static Il2CppClass *(*il2cpp_image_get_class)(const Il2CppImage *, size_t);
 static const char *(*il2cpp_class_get_namespace)(Il2CppClass *);
 static Il2CppObject *(*il2cpp_array_new)(Il2CppClass *, size_t);
+static Il2CppObject *(*il2cpp_object_new)(Il2CppClass *);
+static Il2CppClass *(*il2cpp_array_class_get)(Il2CppClass *, uint32_t);
 
 static MethodInfo *gSetResultMethod = NULL;
 
@@ -484,6 +490,8 @@ static bool pm_resolve_il2cpp(void) {
     il2cpp_image_get_class = (__typeof__(il2cpp_image_get_class))dlsym(h, "il2cpp_image_get_class");
     il2cpp_class_get_namespace = (__typeof__(il2cpp_class_get_namespace))dlsym(h, "il2cpp_class_get_namespace");
     il2cpp_array_new = (__typeof__(il2cpp_array_new))dlsym(h, "il2cpp_array_new");
+    il2cpp_object_new = (__typeof__(il2cpp_object_new))dlsym(h, "il2cpp_object_new");
+    il2cpp_array_class_get = (__typeof__(il2cpp_array_class_get))dlsym(h, "il2cpp_array_class_get");
 #undef RESOLVE
     PMIl2CppReady = true;
     return true;
@@ -1016,90 +1024,320 @@ static void *pm_call_obj(void *obj, const char *name, int argc, void **args) {
     return il2cpp_runtime_invoke(m, obj, args, &exc);
 }
 
-static void *gCloneTabGO = NULL;
+static void *gModPageGO = NULL;
 static BOOL gEntryInjected = NO;
+static Il2CppClass *gTabClass = NULL;
+static Il2CppClass *gTitleCellClass = NULL;
+static Il2CppClass *gChoiceCellClass = NULL;
+static const MethodInfo *gPrefGetIntM = NULL;
 
-// 在官方设置侧栏里克隆一项「Mod设置」
-static BOOL pm_try_official_entry(void *gsp, CGRect *outRect) {
-    if (!gsp || !gFindTypesHost || !il2cpp_array_new) return NO;
-    void *tabs = *(void **)((char *)gsp + 0x40);
-    if (!tabs) return NO;
-    int n = *(int *)((char *)tabs + 0x18);
-    void **items = *(void ***)((char *)tabs + 0x10);
-    if (n <= 0 || !items) return NO;
-    void *srcTab = items[n - 1];
-    void *srcGO = srcTab ? *(void **)((char *)srcTab + 0x10) : NULL;
-    if (!srcGO) return NO;
+// ---- 在官方设置里注册一个真正的「Mod设置」页（复用官方 Tab / Cell 控件） ----
 
-    void *srcTr = pm_call_obj(srcGO, "get_transform", 0, NULL);
-    if (!srcTr) return NO;
-
-    Il2CppClass *vec3 = pm_find_class_any("Vector3", NULL, 0);
-    if (!vec3) return NO;
-    Il2CppObject *corners = il2cpp_array_new(vec3, 4);
-    if (!corners) return NO;
-    void *cargs[1] = {corners};
-    pm_call_obj(srcTr, "GetWorldCorners", 1, cargs);
-    float *pts = (float *)((char *)corners + 0x20);
-    float minX = pts[0], maxX = pts[0], minY = pts[1], maxY = pts[1];
-    for (int i = 1; i < 4; i++) {
-        float x = pts[i * 3], y = pts[i * 3 + 1];
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-    }
-    float h = maxY - minY;
-    if (h < 4 || (maxX - minX) < 4) return NO;
-
-    void *parentTr = pm_call_obj(srcTr, "get_parent", 0, NULL);
-    const MethodInfo *mInst = il2cpp_class_get_method_from_name(gFindTypesHost, "Instantiate", 2);
-    if (!mInst) return NO;
-    void *iargs[2] = {srcGO, parentTr};
-    Il2CppException *exc = NULL;
-    Il2CppObject *clone = il2cpp_runtime_invoke(mInst, NULL, iargs, &exc);
-    if (!clone) return NO;
-    gCloneTabGO = clone;
-
-    Il2CppClass *textCls = pm_class_in_namespace("Text", "UnityEngine.UI", NULL, 0);
-    if (!textCls || !il2cpp_type_get_object || !il2cpp_class_get_type) return NO;
-    void *typeObj = il2cpp_type_get_object(il2cpp_class_get_type(textCls));
-    void *gargs[1] = {typeObj};
-    Il2CppObject *comps = (Il2CppObject *)pm_call_obj((void *)clone, "GetComponentsInChildren", 1, gargs);
-    if (!comps) return NO;
-    int cn = *(int *)((char *)comps + 0x18);
-    void **citems = *(void ***)((char *)comps + 0x20);
-    Il2CppString *title = il2cpp_string_new("Mod设置");
-    for (int i = 0; i < cn; i++) {
-        if (!citems[i] || !title) continue;
-        void *targs[1] = {title};
-        pm_call_obj(citems[i], "set_text", 1, targs);
-    }
-
-    void *cloneTr = pm_call_obj((void *)clone, "get_transform", 0, NULL);
-    if (!cloneTr) return NO;
-    float pos[3] = {(minX + maxX) / 2.0f, (minY + maxY) / 2.0f - h, 0};
-    void *pargs[1] = {pos};
-    pm_call_obj(cloneTr, "set_position", 1, pargs);
-
-    if (outRect) {
-        outRect->origin.x = minX;
-        outRect->origin.y = minY - h;
-        outRect->size.width = maxX - minX;
-        outRect->size.height = h;
-    }
-    PMLog(@"官方 Mod设置项已注入: rect=(%.0f, %.0f, %.0f, %.0f)", minX, minY - h, maxX - minX, h);
-    return YES;
+static Il2CppClass *pm_class_any_ns(const char *name, const char *ns) {
+    return pm_class_in_namespace(name, ns, NULL, 0);
 }
 
-static void pm_remove_official_entry(void) {
-    if (!gCloneTabGO || !gFindTypesHost) return;
-    const MethodInfo *mDestroy = il2cpp_class_get_method_from_name(gFindTypesHost, "Destroy", 1);
-    if (mDestroy) {
-        void *args[1] = {gCloneTabGO};
-        il2cpp_runtime_invoke(mDestroy, NULL, args, NULL);
+static Il2CppObject *pm_make_string_array(const char **vals, int n) {
+    Il2CppClass *s = pm_class_any_ns("String", "System");
+    if (!s || !il2cpp_array_new) return NULL;
+    Il2CppObject *a = il2cpp_array_new(s, (size_t)n);
+    if (!a) return NULL;
+    void **p = (void **)((char *)a + 0x20);
+    for (int i = 0; i < n; i++) p[i] = il2cpp_string_new(vals[i]);
+    return a;
+}
+
+static Il2CppObject *pm_make_int_array(const int *vals, int n) {
+    Il2CppClass *s = pm_class_any_ns("Int32", "System");
+    if (!s || !il2cpp_array_new) return NULL;
+    Il2CppObject *a = il2cpp_array_new(s, (size_t)n);
+    if (!a) return NULL;
+    int *p = (int *)((char *)a + 0x20);
+    for (int i = 0; i < n; i++) p[i] = vals[i];
+    return a;
+}
+
+static void *pm_new_title_cell(const char *label) {
+    if (!gTitleCellClass || !il2cpp_object_new) return NULL;
+    void *obj = il2cpp_object_new(gTitleCellClass);
+    const MethodInfo *m = il2cpp_class_get_method_from_name(gTitleCellClass, ".ctor", 2);
+    if (!obj || !m) return NULL;
+    Il2CppString *l = il2cpp_string_new(label);
+    Il2CppString *t = il2cpp_string_new("");
+    void *args[2] = {l, t};
+    Il2CppException *exc = NULL;
+    il2cpp_runtime_invoke(m, obj, args, &exc);
+    return exc ? NULL : obj;
+}
+
+// 官方 ChoiceCell<int>：两个选项（关/开），结果直接写进 PlayerPrefs
+static void *pm_new_choice_cell(const char *label, const char *prefKey, int def) {
+    if (!gChoiceCellClass || !il2cpp_object_new) return NULL;
+    void *obj = il2cpp_object_new(gChoiceCellClass);
+    const MethodInfo *m = il2cpp_class_get_method_from_name(gChoiceCellClass, ".ctor", 6);
+    if (!obj || !m) return NULL;
+    Il2CppString *l = il2cpp_string_new(label);
+    Il2CppString *t = il2cpp_string_new("");
+    Il2CppString *k = il2cpp_string_new(prefKey);
+    int32_t d = def;
+    const char *labels[2] = {"关闭", "开启"};
+    int vals[2] = {0, 1};
+    Il2CppObject *la = pm_make_string_array(labels, 2);
+    Il2CppObject *va = pm_make_int_array(vals, 2);
+    if (!l || !k || !la || !va) return NULL;
+    void *args[6] = {l, t, k, &d, la, va};
+    Il2CppException *exc = NULL;
+    il2cpp_runtime_invoke(m, obj, args, &exc);
+    return exc ? NULL : obj;
+}
+
+static BOOL pm_tr_is_clone(void *tr) {
+    void *go = pm_call_obj(tr, "get_gameObject", 0, NULL);
+    void *nm = go ? pm_call_obj(go, "get_name", 0, NULL) : NULL;
+    if (!nm) return NO;
+    char buf[256];
+    pm_il2cpp_string_ascii(nm, buf, sizeof(buf));
+    size_t len = strlen(buf);
+    return len >= 7 && strcmp(buf + len - 7, "(Clone)") == 0;
+}
+
+static void pm_destroy_go(void *go) {
+    if (!go || !gFindTypesHost) return;
+    const MethodInfo *m = il2cpp_class_get_method_from_name(gFindTypesHost, "Destroy", 1);
+    if (m) {
+        void *a[1] = {go};
+        il2cpp_runtime_invoke(m, NULL, a, NULL);
     }
-    gCloneTabGO = NULL;
+}
+
+// 清掉克隆页里已经生成的行（Unity 克隆名以 (Clone) 结尾）
+static void pm_clear_cloned_rows(void *pageGO, void *pageTr) {
+    Il2CppClass *trCls = pm_class_any_ns("Transform", "UnityEngine");
+    if (!trCls || !il2cpp_class_get_type || !il2cpp_type_get_object) return;
+    void *typeObj = il2cpp_type_get_object(il2cpp_class_get_type(trCls));
+    if (!typeObj) return;
+    void *args[1] = {typeObj};
+    Il2CppObject *trs = (Il2CppObject *)pm_call_obj(pageGO, "GetComponentsInChildren", 1, args);
+    if (!trs) return;
+    int n = *(int *)((char *)trs + 0x18);
+    void **items = *(void ***)((char *)trs + 0x20);
+    if (n <= 0 || n > 20000 || !items) return;
+    for (int i = 0; i < n; i++) {
+        void *tr = items[i];
+        if (!tr || tr == pageTr) continue;
+        if (!pm_tr_is_clone(tr)) continue;
+        void *parent = pm_call_obj(tr, "get_parent", 0, NULL);
+        if (parent && pm_tr_is_clone(parent)) continue;   // 父级也是克隆，随父一起销毁
+        void *go = pm_call_obj(tr, "get_gameObject", 0, NULL);
+        pm_destroy_go(go);
+    }
+}
+
+// 把页面大标题文本改成「Mod设置」
+static void pm_set_page_title(void *pageGO, void *oldTitle) {
+    if (!oldTitle) return;
+    Il2CppClass *textCls = pm_class_any_ns("Text", "UnityEngine.UI");
+    if (!textCls || !il2cpp_class_get_type || !il2cpp_type_get_object) return;
+    char oldBuf[128] = {0};
+    pm_il2cpp_string_ascii(oldTitle, oldBuf, sizeof(oldBuf));
+    if (!oldBuf[0]) return;
+    void *typeObj = il2cpp_type_get_object(il2cpp_class_get_type(textCls));
+    if (!typeObj) return;
+    void *args[1] = {typeObj};
+    Il2CppObject *comps = (Il2CppObject *)pm_call_obj(pageGO, "GetComponentsInChildren", 1, args);
+    if (!comps) return;
+    int n = *(int *)((char *)comps + 0x18);
+    void **items = (void **)((char *)comps + 0x20);
+    if (n <= 0 || n > 20000 || !items) return;
+    Il2CppString *newTitle = il2cpp_string_new("Mod设置");
+    for (int i = 0; i < n; i++) {
+        void *txt = items[i];
+        if (!txt) continue;
+        void *cur = pm_call_obj(txt, "get_text", 0, NULL);
+        if (!cur) continue;
+        char buf[128] = {0};
+        pm_il2cpp_string_ascii(cur, buf, sizeof(buf));
+        if (strcmp(buf, oldBuf)) continue;
+        void *targs[1] = {newTitle};
+        pm_call_obj(txt, "set_text", 1, targs);
+    }
+}
+
+// 扫描现有设置项，拿到官方 TitleCell / ChoiceCell<int> 的具体类
+static void pm_scan_cell_classes(void *tabs, int tn, void **titems) {
+    for (int i = 0; i < tn; i++) {
+        void *tab = titems[i];
+        void *cells = tab ? *(void **)((char *)tab + 0x28) : NULL;
+        if (!cells) continue;
+        int cn = *(int *)((char *)cells + 0x18);
+        void **citems = *(void ***)((char *)cells + 0x10);
+        if (cn <= 0 || cn > 5000 || !citems) continue;
+        for (int j = 0; j < cn; j++) {
+            void *cell = citems[j];
+            if (!cell) continue;
+            Il2CppClass *k = *(Il2CppClass **)cell;
+            if (!k) continue;
+            const char *name = il2cpp_class_get_name(k);
+            if (!name) continue;
+            if (!gTitleCellClass && strcmp(name, "TitleCell") == 0) gTitleCellClass = k;
+            if (!gChoiceCellClass && strncmp(name, "ChoiceCell", 10) == 0) gChoiceCellClass = k;
+            if (gTitleCellClass && gChoiceCellClass) return;
+        }
+    }
+}
+
+static BOOL pm_tab_has_choice(void *tab) {
+    void *cells = tab ? *(void **)((char *)tab + 0x28) : NULL;
+    if (!cells) return NO;
+    int cn = *(int *)((char *)cells + 0x18);
+    void **citems = *(void ***)((char *)cells + 0x10);
+    if (cn <= 0 || cn > 5000 || !citems) return NO;
+    for (int j = 0; j < cn; j++) {
+        void *cell = citems[j];
+        if (!cell) continue;
+        Il2CppClass *k = *(Il2CppClass **)cell;
+        const char *name = k ? il2cpp_class_get_name(k) : NULL;
+        if (name && strncmp(name, "ChoiceCell", 10) == 0) return YES;
+    }
+    return NO;
+}
+
+static void pm_tab_add_cell(void *tab, void *cell) {
+    if (!tab || !cell) return;
+    void *a[1] = {cell};
+    pm_call_obj(tab, "Add", 1, a);
+}
+
+static void pm_go_set_active(void *go, bool active) {
+    if (!go) return;
+    uint8_t v = active ? 1 : 0;
+    void *a[1] = {&v};
+    pm_call_obj(go, "SetActive", 1, a);
+}
+
+// 构建「Mod设置」页：克隆一个官方页做模板，再通过官方 Add() 注册 Tab
+static BOOL pm_build_mod_tab(void *gsp) {
+    static void *patchedGsp = NULL;
+    if (!gsp || !gFindTypesHost || !il2cpp_object_new || !il2cpp_array_new) return NO;
+    if (patchedGsp == gsp) return YES;   // 同一个设置面板只注册一次
+    void *tabs = *(void **)((char *)gsp + 0x40);
+    void *pages = *(void **)((char *)gsp + 0x58);
+    if (!tabs || !pages) {
+        PMLog(@"Mod页: 面板字段异常 tabs=%p pages=%p", tabs, pages);
+        return NO;
+    }
+    int tn = *(int *)((char *)tabs + 0x18);
+    void **titems = *(void ***)((char *)tabs + 0x10);
+    if (tn <= 0 || tn > 200 || !titems) {
+        PMLog(@"Mod页: tabs 数量异常 %d", tn);
+        return NO;
+    }
+
+    if (!gTabClass && titems[0]) gTabClass = *(Il2CppClass **)titems[0];
+    if (!gTabClass) gTabClass = pm_class_in_namespace("Tab", "", "Layout", 5);
+    if (!gTabClass) {
+        PMLog(@"Mod页: 找不到官方 Tab 类");
+        return NO;
+    }
+    if (!gTitleCellClass || !gChoiceCellClass) pm_scan_cell_classes(tabs, tn, titems);
+    if (!gChoiceCellClass) {
+        PMLog(@"Mod页: 找不到官方 ChoiceCell 类");
+        return NO;
+    }
+
+    void *srcTab = NULL;
+    for (int i = 0; i < tn; i++) {
+        if (pm_tab_has_choice(titems[i])) { srcTab = titems[i]; break; }
+    }
+    if (!srcTab) {
+        PMLog(@"Mod页: 没有可用的模板页");
+        return NO;
+    }
+    void *srcView = *(void **)((char *)srcTab + 0x18);
+    void *srcTr = srcView ? pm_call_obj(srcView, "get_transform", 0, NULL) : NULL;
+    void *parentTr = srcTr ? pm_call_obj(srcTr, "get_parent", 0, NULL) : NULL;
+    const MethodInfo *mInst = il2cpp_class_get_method_from_name(gFindTypesHost, "Instantiate", 2);
+    if (!srcView || !parentTr || !mInst) {
+        PMLog(@"Mod页: 模板页异常 view=%p parent=%p", srcView, parentTr);
+        return NO;
+    }
+
+    void *iargs[2] = {srcView, parentTr};
+    Il2CppException *exc = NULL;
+    Il2CppObject *page = il2cpp_runtime_invoke(mInst, NULL, iargs, &exc);
+    if (!page) {
+        PMLog(@"Mod页: 克隆设置页失败");
+        return NO;
+    }
+    void *pageTr = pm_call_obj((void *)page, "get_transform", 0, NULL);
+    if (!pageTr) {
+        PMLog(@"Mod页: 克隆页没有 Transform");
+        return NO;
+    }
+    void *pargs[1] = {pageTr};
+    pm_call_obj(pages, "Add", 1, pargs);
+    int pageIndex = *(int *)((char *)pages + 0x18) - 1;
+
+    pm_clear_cloned_rows((void *)page, pageTr);
+    pm_set_page_title((void *)page, *(void **)((char *)srcTab + 0x20));
+
+    // 建 Tab 并加入官方设置项
+    void *tab = il2cpp_object_new(gTabClass);
+    const MethodInfo *mTabCtor = il2cpp_class_get_method_from_name(gTabClass, ".ctor", 1);
+    Il2CppString *tabTitle = il2cpp_string_new("Mod设置");
+    if (!tab || !mTabCtor || !tabTitle) {
+        PMLog(@"Mod页: Tab 创建失败 tab=%p ctor=%p", tab, mTabCtor);
+        return NO;
+    }
+    void *targs[1] = {tabTitle};
+    il2cpp_runtime_invoke(mTabCtor, tab, targs, NULL);
+
+    struct { const char *section; const char *label; const char *key; int def; } rows[] = {
+        {"玩法", "自动打歌",          "pm.auto",           1},
+        {NULL,   "全 Perfect",        "pm.ap",             0},
+        {NULL,   "锁血（Miss 不掉血）", "pm.hp",             0},
+        {NULL,   "显示血条并保持满血",  "pm.hp.bar",         1},
+        {"解锁", "全部歌曲解锁",       "pm.unlock",         0},
+        {NULL,   "收藏品全解锁",       "pm.coll",           0},
+        {NULL,   "角色解锁",          "pm.coll.char",      0},
+        {NULL,   "皮肤解锁",          "pm.coll.skin",      0},
+        {NULL,   "收藏品解锁",         "pm.coll.relic",     0},
+        {NULL,   "故事解锁",          "pm.coll.story",     0},
+        {NULL,   "称号解锁",          "pm.coll.title",     0},
+        {NULL,   "背景解锁",          "pm.coll.bg",        0},
+        {NULL,   "挑战解锁",          "pm.coll.challenge", 0},
+        {"网络", "屏蔽成绩上传",        "pm.block",          0},
+        {"悬浮球", "显示悬浮球",        "pm.ball.show",      1},
+        {NULL,   "游玩时自动隐藏",      "pm.ball.auto",      1},
+    };
+    int count = (int)(sizeof(rows) / sizeof(rows[0]));
+    int made = 0;
+    for (int i = 0; i < count; i++) {
+        if (rows[i].section && gTitleCellClass) {
+            pm_tab_add_cell(tab, pm_new_title_cell(rows[i].section));
+        }
+        void *cell = pm_new_choice_cell(rows[i].label, rows[i].key, rows[i].def);
+        if (cell) { pm_tab_add_cell(tab, cell); made++; }
+    }
+    if (made == 0) {
+        PMLog(@"Mod页: 设置项创建失败");
+        return NO;
+    }
+
+    int32_t pi = pageIndex;
+    void *aargs[2] = {&pi, tab};
+    Il2CppException *aexc = NULL;
+    Il2CppClass *gspCls = il2cpp_object_get_class((Il2CppObject *)gsp);
+    const MethodInfo *mGspAdd = gspCls ? il2cpp_class_get_method_from_name(gspCls, "Add", 2) : NULL;
+    if (mGspAdd) il2cpp_runtime_invoke(mGspAdd, gsp, aargs, &aexc);
+    if (aexc) PMLog(@"Mod页: 官方 Add 抛出托管异常（Tab 模板可能不足）");
+    pm_go_set_active((void *)page, false);   // 保持原来的分页状态，等用户点侧栏
+
+    patchedGsp = gsp;
+    gModPageGO = (void *)page;
+    PMLog(@"Mod设置页已注册: page=%d, 行数=%d, 标题类=%s, 选项类=%s", pageIndex, made,
+          gTitleCellClass ? "TitleCell" : "无", "ChoiceCell");
+    return YES;
 }
 
 static int pm_get_lifetype(void) {
@@ -1114,6 +1352,63 @@ static void pm_set_lifetype(int v) {
     int32_t val = v;
     void *args[1] = {&val};
     il2cpp_runtime_invoke(gSetLifeTypeM, NULL, args, NULL);
+}
+
+// 官方设置项把开关写进 PlayerPrefs，这里定期同步
+static int pm_pref_int(const char *key, int def) {
+    if (!gPrefGetIntM) return def;
+    Il2CppString *s = il2cpp_string_new(key);
+    int32_t d = def;
+    void *args[2] = {s, &d};
+    Il2CppObject *boxed = il2cpp_runtime_invoke(gPrefGetIntM, NULL, args, NULL);
+    if (!boxed) return def;
+    return *(int *)((char *)boxed + 0x10);
+}
+
+static void pm_sync_prefs(void) {
+    if (!gPrefGetIntM) {
+        Il2CppClass *pp = pm_class_in_namespace("PlayerPrefs", "UnityEngine", "GetInt", 2);
+        if (pp) gPrefGetIntM = il2cpp_class_get_method_from_name(pp, "GetInt", 2);
+        if (!gPrefGetIntM) return;
+    }
+    struct PMPrefMap { const char *key; int def; int last; bool *target; };
+    static struct PMPrefMap map[] = {
+        {"pm.auto",            1, -99999, &PMAutoPlay},
+        {"pm.ap",              0, -99999, &PMAllPerfect},
+        {"pm.hp",              0, -99999, &PMLockHP},
+        {"pm.hp.bar",          1, -99999, &PMShowLifeBar},
+        {"pm.unlock",          0, -99999, &PMUnlockAll},
+        {"pm.coll",            0, -99999, &PMUnlockCollection},
+        {"pm.coll.char",       0, -99999, &PMUnlockCharacters},
+        {"pm.coll.skin",       0, -99999, &PMUnlockSkins},
+        {"pm.coll.relic",      0, -99999, &PMUnlockRelics},
+        {"pm.coll.story",      0, -99999, &PMUnlockStories},
+        {"pm.coll.title",      0, -99999, &PMUnlockTitles},
+        {"pm.coll.bg",         0, -99999, &PMUnlockBackgrounds},
+        {"pm.coll.challenge",  0, -99999, &PMUnlockChallenges},
+        {"pm.block",           0, -99999, &PMBlockUpload},
+        {"pm.ball.show",       1, -99999, &PMBallVisible},
+        {"pm.ball.auto",       1, -99999, &PMAutoHideInGame},
+    };
+    static BOOL inited = NO;
+    static BOOL logged = NO;
+    BOOL ballChanged = NO;
+    int n = (int)(sizeof(map) / sizeof(map[0]));
+    for (int i = 0; i < n; i++) {
+        int v = pm_pref_int(map[i].key, map[i].def);
+        if (v == map[i].last) continue;
+        map[i].last = v;
+        if (map[i].target == &PMBallVisible || map[i].target == &PMAutoHideInGame) ballChanged = YES;
+        *map[i].target = (v != 0);
+    }
+    if (!inited) {
+        inited = YES;
+        PMLog(@"设置已同步 (auto=%d ap=%d hp=%d bar=%d unlock=%d)",
+              PMAutoPlay, PMAllPerfect, PMLockHP, PMShowLifeBar, PMUnlockAll);
+    } else if (ballChanged || !logged) {
+        PMUpdateBall();
+    }
+    logged = YES;
 }
 
 static void pm_runtime_tick(void) {
@@ -1144,23 +1439,21 @@ static void pm_runtime_tick(void) {
         pm_refresh_object(gPIClass, &gPI_Obj, &gPI_Handle);
         pm_refresh_object(gSettingsClass, &gSettingsObj, &gSettingsHandle);
 
+        pm_sync_prefs();
+
         if (gSettingsObj) {
             if (!gEntryInjected) {
                 gEntryInjected = YES;
-                CGRect rect;
-                if (pm_try_official_entry(gSettingsObj, &rect)) {
-                    PMSetModEntryRect(rect);
-                } else {
-                    PMLog(@"官方侧栏克隆失败，改用覆盖入口");
-                    PMSetModEntryVisible(true);
-                }
                 gEntryVisible = YES;
+                PMSetModEntryVisible(false);
+                if (!pm_build_mod_tab(gSettingsObj)) {
+                    PMLog(@"Mod设置页注册失败，仅保留悬浮球");
+                }
             }
         } else if (gEntryVisible) {
             gEntryVisible = NO;
             gEntryInjected = NO;
-            pm_remove_official_entry();
-            PMSetModEntryVisible(false);
+            gModPageGO = NULL;   // 设置面板已销毁，页面随之销毁
         }
 
         if (gCollectionObj) pm_apply_collection_overrides(gCollectionObj);
