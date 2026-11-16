@@ -126,6 +126,7 @@ static const size_t kOff_CM_Skin          = 0x170;
 static const size_t kOff_PI_Level      = 0x30;
 static const size_t kOff_PI_Rating     = 0x40;
 static const size_t kOff_PI_RatingSmall = 0x48;
+static const size_t kOff_PI_SavedRating = 0x20;
 
 // JudgeSystem / JudgeSlot / List 字段偏移
 static const size_t kOff_JS_Slots = 0x10;
@@ -524,8 +525,14 @@ static bool pm_set_static_bool(const char *klassName, const char *fieldName, boo
     return true;
 }
 
-static bool pm_set_static_float(const char *klassName, const char *fieldName, float value) {
+static void pm_call_static_void(const char *klassName, const char *methodName) {
     Il2CppClass *k = pm_find_class(klassName);
+    if (!k || !il2cpp_class_get_method_from_name) return;
+    const MethodInfo *m = il2cpp_class_get_method_from_name(k, methodName, 0);
+    if (m) il2cpp_runtime_invoke(m, NULL, NULL, NULL);
+}
+
+static bool pm_set_static_float(const char *klassName, const char *fieldName, float value) {    Il2CppClass *k = pm_find_class(klassName);
     if (!k) return false;
     FieldInfo *f = il2cpp_class_get_field_from_name(k, fieldName);
     if (!f) return false;
@@ -784,10 +791,8 @@ static void pm_apply_collection_overrides(void *self) {
     pm_set_text_at(self, kOff_CM_TotalPlayTime, @"playtime");
     pm_set_text_at(self, kOff_CM_TotalScore, @"totalscore");
     pm_set_text_at_ex(self, kOff_CM_Story, @"stories", PMUnlockStories);
-    pm_set_text_at(self, kOff_CM_Track, @"tracks");
     pm_set_text_at(self, kOff_CM_PlayCount, @"playcount");
     pm_set_text_at(self, kOff_CM_NoteDecrypted, @"note");
-    pm_set_text_at(self, kOff_CM_Chart, @"charts");
     pm_set_text_at_ex(self, kOff_CM_Character, @"characters", PMUnlockCharacters);
     pm_set_text_at_ex(self, kOff_CM_Frame, @"backgrounds", PMUnlockBackgrounds);
     pm_set_text_at_ex(self, kOff_CM_Title, @"titles", PMUnlockTitles);
@@ -805,8 +810,22 @@ static void pm_apply_collection_overrides(void *self) {
 static void pm_apply_playerinfo_overrides(void *self) {
     if (!PMProfileEnabled || !self) return;
     pm_set_text_at(self, kOff_PI_Level, @"level");
-    pm_set_text_at(self, kOff_PI_Rating, @"rating");
-    pm_set_text_at(self, kOff_PI_RatingSmall, @"rating");
+    NSString *rv = PMProfileValue(@"rating");
+    if (rv.length) {
+        // 左上角的「8.51」是 savedRating / 100，图标也按这个值分级：
+        // 直接改内部 rating，再调用官方刷新，数字和图标一起变。
+        int32_t rating100 = (int32_t)lround(rv.doubleValue * 100.0);
+        static int32_t appliedRating = -99999;
+        if (rating100 != appliedRating) {
+            *(int32_t *)((char *)self + kOff_PI_SavedRating) = rating100;
+            appliedRating = rating100;
+            pm_call_obj(self, "UpdateRatingDisplayOnSceneLoad", 0, NULL);
+            PMLog(@"主界面评分已设为 %.2f（图标同步刷新）", rating100 / 100.0);
+        }
+    } else {
+        pm_set_text_at(self, kOff_PI_Rating, @"rating");
+        pm_set_text_at(self, kOff_PI_RatingSmall, @"rating");
+    }
 }
 
 static void (*orig_CM_RefreshData)(void *) = NULL;
@@ -871,18 +890,39 @@ static void pm_apply_static_settings(void) {
         }
     }
 
-    // 皮肤 / 故事 / 词典（背景等）本地全解锁
-    bool skins = PMUnlockSkins;
+    // 皮肤 / 故事 / 词典（背景等）本地全解锁；"收藏品全解锁"总开关也会带上
+    static bool gSkinFailLogged = false, gStoryFailLogged = false, gDictFailLogged = false;
+    bool skins = PMUnlockSkins || PMUnlockCollection;
     if (skins != gSkinUnlockWritten) {
-        if (pm_set_static_bool("SkinUnlockStorage", "UnlockAll", skins)) gSkinUnlockWritten = skins;
+        if (pm_set_static_bool("SkinUnlockStorage", "UnlockAll", skins)) {
+            gSkinUnlockWritten = skins;
+            gSkinFailLogged = false;
+            PMLog(@"皮肤全解锁 = %d", skins);
+            if (skins) pm_call_static_void("PlayerHelper", "AutoSkinUnlockInvariance");
+        } else if (!gSkinFailLogged) {
+            PMLog(@"写入 SkinUnlockStorage.UnlockAll 失败");
+            gSkinFailLogged = true;
+        }
     }
-    bool stories = PMUnlockStories;
+    bool stories = PMUnlockStories || PMUnlockCollection;
     if (stories != gStoryUnlockWritten) {
-        if (pm_set_static_bool("StoryUnlockStorage", "UnlockAll", stories)) gStoryUnlockWritten = stories;
+        if (pm_set_static_bool("StoryUnlockStorage", "UnlockAll", stories)) {
+            gStoryUnlockWritten = stories;
+            gStoryFailLogged = false;
+        } else if (!gStoryFailLogged) {
+            PMLog(@"写入 StoryUnlockStorage.UnlockAll 失败");
+            gStoryFailLogged = true;
+        }
     }
-    bool dict = PMUnlockBackgrounds;
+    bool dict = PMUnlockBackgrounds || PMUnlockCollection;
     if (dict != gDictUnlockWritten) {
-        if (pm_set_static_bool("DictStorage", "UnlockAll", dict)) gDictUnlockWritten = dict;
+        if (pm_set_static_bool("DictStorage", "UnlockAll", dict)) {
+            gDictUnlockWritten = dict;
+            gDictFailLogged = false;
+        } else if (!gDictFailLogged) {
+            PMLog(@"写入 DictStorage.UnlockAll 失败");
+            gDictFailLogged = true;
+        }
     }
 
     // 打击音量：最大 150%
@@ -1185,6 +1225,12 @@ static BOOL pm_ptr_ok(const void *p) {
     return v > 0x100000000ULL && (v & 7) == 0;
 }
 
+static const char *pm_obj_class_name(void *obj) {
+    if (!pm_ptr_ok(obj)) return "null";
+    Il2CppClass *k = *(Il2CppClass **)obj;
+    return pm_ptr_ok(k) ? il2cpp_class_get_name(k) : "?";
+}
+
 // 安全读取 Tab.cells，返回数量；-1 表示这个 Tab 指针不可信
 static int pm_tab_cells(void *tab, void ***outItems) {
     if (!pm_ptr_ok(tab)) return -1;
@@ -1252,8 +1298,48 @@ static BOOL pm_tab_has_title(void *tab) {
     return NO;
 }
 
-static void pm_tab_add_cell(void *tab, void *cell) {
-    if (!tab || !cell) return;
+// 评估一个设置面板实例是否已经建好 Tab（多实例时可挑最完整的）
+static int pm_panel_score(void *gsp) {
+    if (!pm_ptr_ok(gsp)) return -1;
+    void *tabs = *(void **)((char *)gsp + 0x40);
+    void *pages = *(void **)((char *)gsp + 0x58);
+    if (!pm_ptr_ok(tabs) || !pm_ptr_ok(pages)) return -1;
+    int tn = *(int *)((char *)tabs + 0x18);
+    void **items = *(void ***)((char *)tabs + 0x10);
+    if (tn <= 0 || tn > 200 || !pm_ptr_ok(items)) return -1;
+    int score = 0;
+    for (int i = 0; i < tn; i++) {
+        if (pm_tab_cells(items[i], NULL) > 0) score++;
+    }
+    int pn = *(int *)((char *)pages + 0x18);
+    if (pn > 0 && pn < 64) score += pn;
+    return score;
+}
+
+// 当前实例 Tab 不可信时，在所有设置面板里挑一个建好的
+static void *pm_find_better_panel(void *cur) {
+    if (!gFindTypesHost || !il2cpp_class_get_type || !il2cpp_type_get_object) return NULL;
+    Il2CppClass *k = il2cpp_object_get_class((Il2CppObject *)cur);
+    if (!k) return NULL;
+    void *typeObj = il2cpp_type_get_object(il2cpp_class_get_type(k));
+    const MethodInfo *m = il2cpp_class_get_method_from_name(gFindTypesHost, "FindObjectsOfType", 1);
+    if (!typeObj || !m) return NULL;
+    void *args[1] = {typeObj};
+    Il2CppObject *arr = il2cpp_runtime_invoke(m, NULL, args, NULL);
+    if (!arr) return NULL;
+    int n = *(int *)((char *)arr + 0x18);
+    void **items = *(void ***)((char *)arr + 0x20);
+    if (n <= 0 || n > 64 || !pm_ptr_ok(items)) return NULL;
+    int bestScore = pm_panel_score(cur);
+    void *best = NULL;
+    for (int i = 0; i < n; i++) {
+        int s = pm_panel_score(items[i]);
+        if (s > bestScore) { bestScore = s; best = items[i]; }
+    }
+    return best;
+}
+
+static void pm_tab_add_cell(void *tab, void *cell) {    if (!tab || !cell) return;
     void *a[1] = {cell};
     pm_call_obj(tab, "Add", 1, a);
 }
@@ -1269,6 +1355,13 @@ static void pm_go_set_active(void *go, bool active) {
 static BOOL pm_build_mod_tab(void *gsp) {
     static void *patchedGsp = NULL;
     if (!gsp || !gFindTypesHost || !il2cpp_object_new || !il2cpp_array_new) return NO;
+    if (pm_panel_score(gsp) <= 0) {
+        void *better = pm_find_better_panel(gsp);
+        if (better) {
+            PMLog(@"Mod页: 换用已建好的设置面板 %p -> %p", gsp, better);
+            gsp = better;
+        }
+    }
     if (patchedGsp == gsp) return YES;   // 同一个设置面板只注册一次
     void *tabs = *(void **)((char *)gsp + 0x40);
     void *pages = *(void **)((char *)gsp + 0x58);
@@ -1283,6 +1376,17 @@ static BOOL pm_build_mod_tab(void *gsp) {
         return NO;
     }
     PMLog(@"Mod页: 开始注入 gsp=%p tabs=%d pages=%d", gsp, tn, *(int *)((char *)pages + 0x18));
+    PMLog(@"Mod页: tabs类=%s t0=%p(%s) t1=%p t2=%p t3=%p", pm_obj_class_name(tabs),
+          titems[0], pm_obj_class_name(titems[0]),
+          tn > 1 ? titems[1] : NULL, tn > 2 ? titems[2] : NULL, tn > 3 ? titems[3] : NULL);
+    if (tn > 0 && pm_ptr_ok(titems[0])) {
+        void *t0 = titems[0];
+        PMLog(@"Mod页: tab0 +10=%p(%s) +18=%p(%s) +20=%p +28=%p(%s)",
+              *(void **)((char *)t0 + 0x10), pm_obj_class_name(*(void **)((char *)t0 + 0x10)),
+              *(void **)((char *)t0 + 0x18), pm_obj_class_name(*(void **)((char *)t0 + 0x18)),
+              *(void **)((char *)t0 + 0x20),
+              *(void **)((char *)t0 + 0x28), pm_obj_class_name(*(void **)((char *)t0 + 0x28)));
+    }
 
     if (!gTabClass && pm_ptr_ok(titems[0])) {
         Il2CppClass *k0 = *(Il2CppClass **)titems[0];
@@ -1507,13 +1611,16 @@ static void pm_runtime_tick(void) {
         pm_sync_prefs();
 
         if (gSettingsObj) {
+            static CFTimeInterval lastAttempt = 0;
             if (!gSettingsSeenAt) gSettingsSeenAt = now;
-            if (!gEntryInjected && now - gSettingsSeenAt > 0.5) {   // 等设置面板初始化稳定后再注入
-                gEntryInjected = YES;
+            if (!gEntryInjected && now - gSettingsSeenAt > 0.5 && now - lastAttempt > 3.0) {
+                lastAttempt = now;
                 gEntryVisible = YES;
                 PMSetModEntryVisible(false);
-                if (!pm_build_mod_tab(gSettingsObj)) {
-                    PMLog(@"Mod设置页注册失败，仅保留悬浮球");
+                if (pm_build_mod_tab(gSettingsObj)) {
+                    gEntryInjected = YES;
+                } else {
+                    PMLog(@"Mod设置页注册失败，3 秒后重试");
                 }
             }
         } else if (gEntryVisible) {
