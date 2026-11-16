@@ -4,6 +4,7 @@
 
 #import "PMCommon.h"
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #include <math.h>
 
 typedef NS_ENUM(NSInteger, PMRowTag) {
@@ -201,16 +202,44 @@ static void pm_open_panel(void);
 @implementation PMBallView
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
-        self.backgroundColor = [UIColor colorWithRed:0.35 green:0.75 blue:1.0 alpha:0.9];
-        self.layer.cornerRadius = frame.size.width / 2;
+        CGFloat side = frame.size.width;
+        self.backgroundColor = UIColor.clearColor;
+        self.layer.cornerRadius = side / 2;
+        self.layer.masksToBounds = NO;
+        self.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
+        self.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.55].CGColor;
         self.layer.shadowColor = UIColor.blackColor.CGColor;
-        self.layer.shadowOpacity = 0.35;
-        self.layer.shadowRadius = 4;
+        self.layer.shadowOpacity = 0.30;
+        self.layer.shadowRadius = 7;
+        self.layer.shadowOffset = CGSizeMake(0, 2);
+
+        CAGradientLayer *g = [CAGradientLayer layer];
+        g.frame = self.bounds;
+        g.cornerRadius = side / 2;
+        g.colors = @[(id)[UIColor colorWithRed:0.42 green:0.82 blue:1.0 alpha:0.96].CGColor,
+                     (id)[UIColor colorWithRed:0.13 green:0.44 blue:0.92 alpha:0.96].CGColor];
+        g.startPoint = CGPointMake(0.15, 0.0);
+        g.endPoint = CGPointMake(0.9, 1.0);
+        [self.layer addSublayer:g];
+
+        CAGradientLayer *shine = [CAGradientLayer layer];
+        shine.frame = CGRectMake(side * 0.10, side * 0.05, side * 0.80, side * 0.42);
+        shine.cornerRadius = side * 0.21;
+        shine.colors = @[(id)[UIColor colorWithWhite:1 alpha:0.35].CGColor,
+                         (id)[UIColor colorWithWhite:1 alpha:0.0].CGColor];
+        shine.startPoint = CGPointMake(0.5, 0.0);
+        shine.endPoint = CGPointMake(0.5, 1.0);
+        [self.layer addSublayer:shine];
+
         UILabel *l = [[UILabel alloc] initWithFrame:self.bounds];
         l.text = @"M";
         l.textAlignment = NSTextAlignmentCenter;
-        l.font = [UIFont boldSystemFontOfSize:24];
-        l.textColor = UIColor.whiteColor;
+        l.font = [UIFont systemFontOfSize:side * 0.44 weight:UIFontWeightSemibold];
+        l.textColor = [UIColor colorWithWhite:1 alpha:0.96];
+        l.layer.shadowColor = [UIColor colorWithWhite:0 alpha:0.35].CGColor;
+        l.layer.shadowOpacity = 1;
+        l.layer.shadowRadius = 1.5;
+        l.layer.shadowOffset = CGSizeZero;
         l.userInteractionEnabled = NO;
         [self addSubview:l];
         [self addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)]];
@@ -430,12 +459,6 @@ static UIWindowScene *pm_active_scene(void) {
     [self fieldRow:@"Rating" key:@"rating" placeholder:@"例如 16.00"];
     [self fieldRow:@"曲目数" key:@"tracks" placeholder:@"例如 441"];
     [self fieldRow:@"谱面数" key:@"charts" placeholder:@"例如 1371"];
-    [self fieldRow:@"角色" key:@"characters" placeholder:@"例如 54/54"];
-    [self fieldRow:@"皮肤" key:@"skins" placeholder:@"例如 92/92"];
-    [self fieldRow:@"故事" key:@"stories" placeholder:@"例如 127/127"];
-    [self fieldRow:@"称号" key:@"titles" placeholder:@"例如 853/853"];
-    [self fieldRow:@"背景" key:@"backgrounds" placeholder:@"例如 232/232"];
-    [self fieldRow:@"标题画面" key:@"titlescreens" placeholder:@"例如 20/20"];
     [self fieldRow:@"游玩次数" key:@"playcount" placeholder:@"例如 9999"];
     [self fieldRow:@"总时长" key:@"playtime" placeholder:@"例如 999:59:59"];
     [self fieldRow:@"总分" key:@"totalscore" placeholder:@"例如 99999999"];
@@ -459,6 +482,8 @@ static UIWindowScene *pm_active_scene(void) {
     [self toggleRow:@"游玩时自动隐藏" detail:@"进入打歌界面自动收起，避免误触"
                 tag:PMRowAutoHide on:PMAutoHideInGame];
     [self sliderRow:@"悬浮球透明度" value:PMBallAlpha min:0.2 max:1.0 action:@selector(onBallAlpha:)];
+    [self sliderRow:[NSString stringWithFormat:@"悬浮球大小 %.0f", PMBallSize]
+              value:PMBallSize min:40 max:96 action:@selector(onBallSize:)];
 
     UILabel *tip = [[UILabel alloc] initWithFrame:CGRectMake(22, _y, self.view.bounds.size.width - 44, 40)];
     tip.text = @"悬浮球可拖动；隐藏后轻触屏幕右边缘中部的小圆点即可再次打开设置。游玩时会自动收起。";
@@ -678,6 +703,16 @@ static UIWindowScene *pm_active_scene(void) {
     PMUpdateBall();
 }
 
+- (void)onBallSize:(UISlider *)sl {
+    PMBallSize = sl.value;
+    UILabel *lab = [self.view viewWithTag:9001];
+    lab.text = [NSString stringWithFormat:@"%.0f", sl.value];
+    UILabel *title = [sl.superview viewWithTag:9102];
+    title.text = [NSString stringWithFormat:@"悬浮球大小 %.0f", sl.value];
+    [self persist];
+    PMUpdateBall();
+}
+
 - (void)textFieldDidBeginEditing:(UITextField *)textField {
     gActiveField = textField;
 }
@@ -725,6 +760,7 @@ static UIWindowScene *pm_active_scene(void) {
     [d setBool:PMBallVisible forKey:@"pm.ball.show"];
     [d setBool:PMAutoHideInGame forKey:@"pm.ball.auto"];
     [d setFloat:PMBallAlpha forKey:@"pm.ball.alpha"];
+    [d setFloat:PMBallSize forKey:@"pm.ball.size"];
     [d setFloat:PMHitVolumeBoost forKey:@"pm.hitvol"];
 }
 
@@ -783,7 +819,7 @@ static UIWindowScene *pm_active_scene(void) {
     _text.layer.cornerRadius = 10;
     _text.textColor = [UIColor colorWithWhite:0.92 alpha:1];
     _text.font = [UIFont fontWithName:@"Menlo" size:10] ?: [UIFont systemFontOfSize:10];
-    _text.text = PMLogTail(1000);
+    _text.text = PMLogTail(400);
     [self.view addSubview:_text];
 
     CGFloat by = h - 104;
@@ -818,8 +854,13 @@ static UIWindowScene *pm_active_scene(void) {
 }
 
 - (void)onShare:(UIButton *)sender {
+    NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *path = [dirs.firstObject stringByAppendingPathComponent:@"ParadigmMod.log"];
+    id item = [NSFileManager.defaultManager fileExistsAtPath:path]
+                  ? [NSURL fileURLWithPath:path]
+                  : (id)PMLogTail(0);
     UIActivityViewController *vc = [[UIActivityViewController alloc]
-        initWithActivityItems:@[PMLogTail(0)] applicationActivities:nil];
+        initWithActivityItems:@[item] applicationActivities:nil];
     if (vc.popoverPresentationController) {
         vc.popoverPresentationController.sourceView = sender;
         vc.popoverPresentationController.sourceRect = sender.bounds;
@@ -850,6 +891,7 @@ static void pm_open_panel(void) {
         vc.onDismiss = ^{
             gPanelWindow.hidden = YES;
             gPanelWindow = nil;
+            PMUpdateBall();
         };
         gPanelWindow.rootViewController = vc;
         gPanelWindow.hidden = NO;
@@ -860,6 +902,7 @@ static void pm_open_panel(void) {
 static int gBallMode = -1;   // -1 未渲染, 0 隐藏, 1 悬浮球, 2 边缘小点
 
 @interface PMBallTicker : NSObject
++ (instancetype)shared;
 @end
 
 static BOOL pm_in_gameplay(void) {
@@ -889,7 +932,7 @@ void PMUpdateBall(void) {
         UIWindowScene *scene = pm_active_scene();
         CGRect sb = scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
         if (mode == 1) {
-            CGFloat side = 56;
+            CGFloat side = MAX(40.0f, MIN(96.0f, PMBallSize));
             NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
             CGFloat x = [d objectForKey:@"pm.ball.x"] ? [d floatForKey:@"pm.ball.x"] : 24;
             CGFloat y = [d objectForKey:@"pm.ball.y"] ? [d floatForKey:@"pm.ball.y"] : 64;
@@ -932,12 +975,18 @@ void PMShowOverlay(void) {
         PMUpdateBall();
         if (!timerStarted) {
             timerStarted = YES;
-            [NSTimer scheduledTimerWithTimeInterval:1.0 target:[PMBallTicker class]
+            [NSTimer scheduledTimerWithTimeInterval:1.0 target:[PMBallTicker shared]
                                            selector:@selector(tick) userInfo:nil repeats:YES];
         }
     });
 }
 
 @implementation PMBallTicker
-+ (void)tick { pm_ball_tick(); }
++ (instancetype)shared {
+    static PMBallTicker *t = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ t = [PMBallTicker new]; });
+    return t;
+}
+- (void)tick { pm_ball_tick(); }
 @end

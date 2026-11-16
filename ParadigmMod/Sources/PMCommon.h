@@ -37,20 +37,24 @@ NSString *PMProfileValue(NSString *key);
 // 悬浮球
 extern bool PMBallVisible;
 extern float PMBallAlpha;
+extern float PMBallSize;
 
 // 诊断
 extern volatile int PMLastSlotCount;
 extern volatile int PMAutoJudged;
 extern volatile bool PMHookReady;
+extern volatile bool PMHookFailed;
 extern volatile bool PMIl2CppReady;
 extern volatile bool PMUnlockAllApplied;
 extern volatile int PMUploadBlocked;
 
 void PMLog(NSString *fmt, ...);
 void PMLogInstallCrashHandler(void);
+void PMLogReset(void);
 NSString *PMLogTail(NSUInteger maxLines);
 void PMLogClear(void);
 int PMUnityCryptid(void);
+NSString *PMUnityUUIDString(void);
 void *PMUnityBase(void);
 void PMInstallHooks(void);
 void PMApplySettingsNow(void);

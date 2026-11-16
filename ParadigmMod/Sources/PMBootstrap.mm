@@ -8,6 +8,7 @@ static dispatch_source_t gTimer = NULL;
 
 __attribute__((constructor))
 static void PMBootstrap(void) {
+    PMLogReset();              // 每次启动重新生成日志
     PMLogInstallCrashHandler();
     NSBundle *bundle = [NSBundle mainBundle];
     PMLog(@"启动: %@ %@ (%@)", bundle.bundleIdentifier,
@@ -34,12 +35,13 @@ static void PMBootstrap(void) {
     PMAutoHideInGame = [d objectForKey:@"pm.ball.auto"] ? [d boolForKey:@"pm.ball.auto"] : YES;
     PMBallVisible = [d objectForKey:@"pm.ball.show"] ? [d boolForKey:@"pm.ball.show"] : YES;
     PMBallAlpha   = [d objectForKey:@"pm.ball.alpha"] ? [d floatForKey:@"pm.ball.alpha"] : 0.85f;
+    PMBallSize    = [d objectForKey:@"pm.ball.size"] ? [d floatForKey:@"pm.ball.size"] : 56.0f;
+    if (PMBallSize < 40.0f || PMBallSize > 96.0f) PMBallSize = 56.0f;
     PMProfileEnabled = [d boolForKey:@"pm.profile.on"];
 
     // 个人资料本地覆盖值
     NSMutableDictionary<NSString *, NSString *> *profile = [NSMutableDictionary dictionary];
-    NSArray<NSString *> *keys = @[@"id", @"level", @"rating", @"tracks", @"charts", @"characters",
-                                  @"skins", @"stories", @"titles", @"backgrounds", @"titlescreens",
+    NSArray<NSString *> *keys = @[@"id", @"level", @"rating", @"tracks", @"charts",
                                   @"playcount", @"playtime", @"totalscore", @"note", @"grades",
                                   @"alldecrypted", @"fullcombo", @"clear", @"infinity", @"aaa", @"aa"];
     for (NSString *k in keys) {
@@ -60,19 +62,20 @@ static void PMBootstrap(void) {
     });
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        for (int i = 0; i < 90; i++) {
+        for (int i = 0; i < 6; i++) {
             @autoreleasepool {
                 if (PMUnityBase()) {
                     // il2cpp 的 class/domain API 必须在 Unity 主线程调用
                     dispatch_sync(dispatch_get_main_queue(), ^{
                         PMInstallHooks();
                     });
-                    if (PMHookReady) break;
+                    if (PMHookReady || PMHookFailed) break;
                 }
             }
-            [NSThread sleepForTimeInterval:1.0];
+            [NSThread sleepForTimeInterval:2.0];
         }
-        PMLog(@"hook 安装结束: ready=%d cryptid=%d", PMHookReady, PMUnityCryptid());
+        PMLog(@"hook 安装结束: ready=%d failed=%d cryptid=%d uuid=%@",
+              PMHookReady, PMHookFailed, PMUnityCryptid(), PMUnityUUIDString());
 
         // 静态字段（全解锁 / 变速）需要周期性重写
         dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());

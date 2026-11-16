@@ -18,6 +18,7 @@
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <mach/vm_map.h>
 #include <sys/mman.h>
 #include <string.h>
@@ -58,6 +59,7 @@ NSMutableDictionary<NSString *, NSString *> *PMProfileText = nil;
 
 bool PMBallVisible = true;
 float PMBallAlpha = 0.85f;
+float PMBallSize = 56.0f;
 
 NSString *PMProfileValue(NSString *key) {
     NSString *v = PMProfileText[key];
@@ -68,6 +70,7 @@ NSString *PMProfileValue(NSString *key) {
 volatile int PMLastSlotCount = -1;
 volatile int PMAutoJudged = 0;
 volatile bool PMHookReady = false;
+volatile bool PMHookFailed = false;
 volatile bool PMIl2CppReady = false;
 volatile bool PMUnlockAllApplied = false;
 volatile int PMUploadBlocked = 0;
@@ -207,6 +210,9 @@ void PMLogClear(void) {
     os_unfair_lock_unlock(&gLogLock);
 }
 
+// 每次启动重新生成日志文件
+void PMLogReset(void) { PMLogClear(); }
+
 static void pm_uncaught_handler(NSException *e) {
     PMLog(@"💥 未捕获异常 %@: %@\n%@", e.name, e.reason, [e.callStackSymbols componentsJoinedByString:@"\n"]);
 }
@@ -226,8 +232,10 @@ void *PMUnityBase(void) {
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
         const char *name = _dyld_get_image_name(i);
         if (name && strstr(name, "UnityFramework")) {
-            gUnityBase = (uintptr_t)_dyld_get_image_header(i) + (uintptr_t)_dyld_get_image_vmaddr_slide(i);
-            PMLog(@"UnityFramework base = %p", (void *)gUnityBase);
+            // _dyld_get_image_header 返回的就是已加 slide 的实际地址，
+            // 再叠加 _dyld_get_image_vmaddr_slide 会导致所有 RVA 偏移错误
+            gUnityBase = (uintptr_t)_dyld_get_image_header(i);
+            PMLog(@"UnityFramework base = %p (%s)", (void *)gUnityBase, name);
             return (void *)gUnityBase;
         }
     }
@@ -278,17 +286,30 @@ static void pm_macho_uuid(void *base, char *out, size_t cap) {
     }
 }
 
+NSString *PMUnityUUIDString(void) {
+    void *b = PMUnityBase();
+    if (!b) return @"(no base)";
+    char uuid[40];
+    pm_macho_uuid(b, uuid, sizeof(uuid));
+    return [NSString stringWithUTF8String:uuid];
+}
+
 // ---------------------------------------------------------------------------
 // 极简 arm64 inline hook（入口 16 字节 + trampoline）
 // ---------------------------------------------------------------------------
-// iOS 14+ 强制 W^X：不能同时申请 WRITE|EXEC，分两步改权限
+// iOS 14+ 强制 W^X：用 VM_PROT_COPY 让内核复制一份代码页再写（等价 fishhook 的做法）
 static bool pm_make_writable(void *addr, size_t size) {
     vm_address_t page = (vm_address_t)addr & ~(vm_page_size - 1);
     size_t span = ((vm_address_t)addr + size) - page;
-    kern_return_t kr = vm_protect(mach_task_self(), page, span, FALSE,
-                                  VM_PROT_READ | VM_PROT_WRITE);
+    kern_return_t kr = mach_vm_protect(mach_task_self(), page, span, FALSE,
+                                       VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr != KERN_SUCCESS) {
+        kr = vm_protect(mach_task_self(), page, span, FALSE,
+                        VM_PROT_READ | VM_PROT_WRITE);
+    }
     if (kr != KERN_SUCCESS) {
         PMLog(@"vm_protect(RW) 失败: %d（运行时改代码被系统拦截）", kr);
+        PMHookFailed = true;
         return false;
     }
     return true;
@@ -297,7 +318,7 @@ static bool pm_make_writable(void *addr, size_t size) {
 static void pm_restore_executable(void *addr, size_t size) {
     vm_address_t page = (vm_address_t)addr & ~(vm_page_size - 1);
     size_t span = ((vm_address_t)addr + size) - page;
-    vm_protect(mach_task_self(), page, span, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    mach_vm_protect(mach_task_self(), page, span, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
 }
 
 // ldr x16, #8 ; br x16 ; .quad target
@@ -677,20 +698,33 @@ static void pm_set_text_at(void *self, size_t off, NSString *key) {
     pm_set_component_text(comp, v);
 }
 
+// 资料页文本：优先用自定义值；没填但对应解锁开关打开时显示「全解锁」
+static void pm_set_text_at_ex(void *self, size_t off, NSString *key, BOOL unlocked) {
+    if (!self) return;
+    NSString *v = PMProfileValue(key);
+    if (!v && unlocked) v = @"全解锁";
+    if (!v) return;
+    void *comp = *(void **)((char *)self + off);
+    pm_set_component_text(comp, v);
+}
+
 static void pm_apply_collection_overrides(void *self) {
-    if (!PMProfileEnabled || !self) return;
+    if (!self) return;
+    BOOL anyUnlock = PMUnlockCharacters || PMUnlockSkins || PMUnlockStories ||
+                     PMUnlockTitles || PMUnlockBackgrounds;
+    if (!PMProfileEnabled && !anyUnlock) return;
     pm_set_text_at(self, kOff_CM_Id, @"id");
     pm_set_text_at(self, kOff_CM_TotalPlayTime, @"playtime");
     pm_set_text_at(self, kOff_CM_TotalScore, @"totalscore");
-    pm_set_text_at(self, kOff_CM_Story, @"stories");
+    pm_set_text_at_ex(self, kOff_CM_Story, @"stories", PMUnlockStories);
     pm_set_text_at(self, kOff_CM_Track, @"tracks");
     pm_set_text_at(self, kOff_CM_PlayCount, @"playcount");
     pm_set_text_at(self, kOff_CM_NoteDecrypted, @"note");
     pm_set_text_at(self, kOff_CM_Chart, @"charts");
-    pm_set_text_at(self, kOff_CM_Character, @"characters");
-    pm_set_text_at(self, kOff_CM_Frame, @"backgrounds");
-    pm_set_text_at(self, kOff_CM_Title, @"titles");
-    pm_set_text_at(self, kOff_CM_TitleScreen, @"titlescreens");
+    pm_set_text_at_ex(self, kOff_CM_Character, @"characters", PMUnlockCharacters);
+    pm_set_text_at_ex(self, kOff_CM_Frame, @"backgrounds", PMUnlockBackgrounds);
+    pm_set_text_at_ex(self, kOff_CM_Title, @"titles", PMUnlockTitles);
+    pm_set_text_at_ex(self, kOff_CM_TitleScreen, @"titlescreens", PMUnlockTitles || PMUnlockBackgrounds);
     pm_set_text_at(self, kOff_CM_AllDecrypted, @"alldecrypted");
     pm_set_text_at(self, kOff_CM_FullCombo, @"fullcombo");
     pm_set_text_at(self, kOff_CM_Clear, @"clear");
@@ -698,7 +732,7 @@ static void pm_apply_collection_overrides(void *self) {
     pm_set_text_at(self, kOff_CM_AAA, @"aaa");
     pm_set_text_at(self, kOff_CM_AA, @"aa");
     pm_set_text_at(self, kOff_CM_Rating, @"rating");
-    pm_set_text_at(self, kOff_CM_Skin, @"skins");
+    pm_set_text_at_ex(self, kOff_CM_Skin, @"skins", PMUnlockSkins);
 }
 
 static void pm_apply_playerinfo_overrides(void *self) {
@@ -809,12 +843,10 @@ void PMApplySettingsNow(void) { pm_apply_static_settings(); }
 // ---------------------------------------------------------------------------
 void PMInstallHooks(void) {
     if (PMHookReady) return;
+    if (PMHookFailed) return;          // 代码页不可写，重试没有意义
     if (!PMUnityBase()) return;
     void *base = (void *)gUnityBase;
-    char uuid[40];
-    pm_macho_uuid(base, uuid, sizeof(uuid));
-    PMLog(@"开始安装 hook: base=%p cryptid=%d uuid=%@", base, PMUnityCryptid(),
-          [NSString stringWithUTF8String:uuid]);
+    PMLog(@"开始安装 hook: base=%p cryptid=%d uuid=%@", base, PMUnityCryptid(), PMUnityUUIDString());
 
     bool api = pm_resolve_il2cpp();
     PMLog(@"il2cpp 符号解析: %d", api);
