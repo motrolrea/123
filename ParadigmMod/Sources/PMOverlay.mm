@@ -296,6 +296,71 @@ static UIWindowScene *pm_active_scene(void) {
 }
 
 // ---------------------------------------------------------------------------
+// 官方设置页里的 MOD 入口（检测到设置面板时显示）
+// ---------------------------------------------------------------------------
+static UIWindow *gEntryWindow = nil;
+
+@interface PMEntryButton : UIControl
+@end
+
+@implementation PMEntryButton
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.backgroundColor = UIColor.clearColor;
+        self.opaque = NO;
+        [self addTarget:self action:@selector(onTap) forControlEvents:UIControlEventTouchUpInside];
+    }
+    return self;
+}
+- (void)onTap { pm_open_panel(); }
+- (void)setHighlighted:(BOOL)highlighted {
+    [super setHighlighted:highlighted];
+    self.alpha = highlighted ? 0.6 : 1.0;
+}
+- (void)drawRect:(CGRect)rect {
+    CGRect r = CGRectInset(self.bounds, 2, 4);
+    UIBezierPath *p = PMSlant(r, 0.30);
+    [[UIColor colorWithWhite:0.04 alpha:0.78] setFill];
+    [p fill];
+    [[UIColor colorWithRed:0.35 green:0.75 blue:1.0 alpha:0.9] setStroke];
+    p.lineWidth = 1.0;
+    [p stroke];
+
+    NSMutableParagraphStyle *ps = [NSMutableParagraphStyle new];
+    ps.alignment = NSTextAlignmentCenter;
+    NSDictionary *attrs = @{NSFontAttributeName:[UIFont italicSystemFontOfSize:15],
+                            NSForegroundColorAttributeName:UIColor.whiteColor,
+                            NSParagraphStyleAttributeName:ps};
+    [@"MOD" drawInRect:CGRectInset(r, 0, r.size.height * 0.28) withAttributes:attrs];
+}
+@end
+
+void PMSetModEntryVisible(bool visible) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!visible) {
+            gEntryWindow.hidden = YES;
+            return;
+        }
+        if (!gEntryWindow) {
+            UIWindowScene *scene = pm_active_scene();
+            CGRect sb = scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
+            CGRect f = CGRectMake(30, sb.size.height - 70, 112, 42);
+            gEntryWindow = scene ? [[UIWindow alloc] initWithWindowScene:scene]
+                                 : [[UIWindow alloc] initWithFrame:f];
+            gEntryWindow.frame = f;
+            gEntryWindow.windowLevel = UIWindowLevelAlert + 1;
+            gEntryWindow.backgroundColor = UIColor.clearColor;
+            UIViewController *root = [UIViewController new];
+            root.view.backgroundColor = UIColor.clearColor;
+            gEntryWindow.rootViewController = root;
+            PMEntryButton *b = [[PMEntryButton alloc] initWithFrame:CGRectMake(0, 0, f.size.width, f.size.height)];
+            [root.view addSubview:b];
+        }
+        gEntryWindow.hidden = NO;
+    });
+}
+
+// ---------------------------------------------------------------------------
 // 设置页
 // ---------------------------------------------------------------------------
 @interface PMSettingsController () <UITextFieldDelegate>

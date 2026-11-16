@@ -63,6 +63,7 @@ void PMStartRuntimeFeatures(void);
 void PMShowOverlay(void);
 void PMUpdateOverlay(void);
 void PMUpdateBall(void);
+void PMSetModEntryVisible(bool visible);
 
 #ifdef __cplusplus
 }

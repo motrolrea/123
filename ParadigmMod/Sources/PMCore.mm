@@ -448,6 +448,8 @@ static Il2CppType *(*il2cpp_class_get_type)(Il2CppClass *);
 static Il2CppObject *(*il2cpp_type_get_object)(const Il2CppType *);
 static void *(*il2cpp_gchandle_new)(Il2CppObject *, bool);
 static void (*il2cpp_gchandle_free)(void *);
+static size_t (*il2cpp_image_get_class_count)(const Il2CppImage *);
+static Il2CppClass *(*il2cpp_image_get_class)(const Il2CppImage *, size_t);
 
 static MethodInfo *gSetResultMethod = NULL;
 
@@ -475,6 +477,8 @@ static bool pm_resolve_il2cpp(void) {
     il2cpp_type_get_object = (__typeof__(il2cpp_type_get_object))dlsym(h, "il2cpp_type_get_object");
     il2cpp_gchandle_new = (__typeof__(il2cpp_gchandle_new))dlsym(h, "il2cpp_gchandle_new");
     il2cpp_gchandle_free = (__typeof__(il2cpp_gchandle_free))dlsym(h, "il2cpp_gchandle_free");
+    il2cpp_image_get_class_count = (__typeof__(il2cpp_image_get_class_count))dlsym(h, "il2cpp_image_get_class_count");
+    il2cpp_image_get_class = (__typeof__(il2cpp_image_get_class))dlsym(h, "il2cpp_image_get_class");
 #undef RESOLVE
     PMIl2CppReady = true;
     return true;
@@ -907,8 +911,12 @@ static CFTimeInterval gLastFindTime = 0;
 static CFTimeInterval gLastSlowTime = 0;
 static int gLastLifeValue = -1;
 static void *gLastGCObj = NULL;
+static Il2CppClass *gSettingsClass = NULL;
+static void *gSettingsObj = NULL;
+static void *gSettingsHandle = NULL;
+static BOOL gEntryVisible = NO;
 
-static Il2CppClass *pm_class_with_static_method(const char *cls, const char *m, int argc) {
+static Il2CppClass *pm_find_class_any(const char *name, const char *method, int argc) {
     Il2CppDomain *domain = il2cpp_domain_get();
     if (!domain) return NULL;
     if (il2cpp_thread_attach) il2cpp_thread_attach(domain);
@@ -918,11 +926,26 @@ static Il2CppClass *pm_class_with_static_method(const char *cls, const char *m, 
     for (size_t i = 0; i < count; i++) {
         Il2CppImage *img = il2cpp_assembly_get_image(asms[i]);
         if (!img) continue;
-        Il2CppClass *k = il2cpp_class_from_name(img, "", cls);
-        if (!k) continue;
-        if (il2cpp_class_get_method_from_name(k, m, argc)) return k;
+        Il2CppClass *k = il2cpp_class_from_name(img, "", name);
+        if (k && (!method || il2cpp_class_get_method_from_name(k, method, argc))) return k;
+        if (il2cpp_image_get_class_count && il2cpp_image_get_class) {
+            size_t n = il2cpp_image_get_class_count(img);
+            if (n > 40000) n = 40000;
+            for (size_t j = 0; j < n; j++) {
+                Il2CppClass *c = il2cpp_image_get_class(img, j);
+                if (!c) continue;
+                const char *cn = il2cpp_class_get_name(c);
+                if (!cn || strcmp(cn, name)) continue;
+                if (method && !il2cpp_class_get_method_from_name(c, method, argc)) continue;
+                return c;
+            }
+        }
     }
     return NULL;
+}
+
+static Il2CppClass *pm_class_with_static_method(const char *cls, const char *m, int argc) {
+    return pm_find_class_any(cls, m, argc);
 }
 
 // 用 Object.FindObjectOfType 找场景里唯一实例，并用 GCHandle 保活
@@ -955,16 +978,24 @@ static void pm_runtime_tick(void) {
             gWrapClass = pm_find_class("JudgeSystemWrap");
             gCollectionClass = pm_find_class("CollectionManager");
             gPIClass = pm_find_class("PlayerInfoManager");
+            gSettingsClass = pm_find_class_any("GenericSettingsPanel", NULL, 0);
             gFindTypesHost = pm_class_with_static_method("Object", "FindObjectOfType", 2);
             if (gFindTypesHost) {
                 gFindTypeMethod = il2cpp_class_get_method_from_name(gFindTypesHost, "FindObjectOfType", 2);
             }
-            PMLog(@"轮询模式: wrap=%p collection=%p playerInfo=%p findType=%p",
-                  gWrapClass, gCollectionClass, gPIClass, gFindTypeMethod);
+            PMLog(@"轮询模式: wrap=%p collection=%p playerInfo=%p settings=%p findType=%p",
+                  gWrapClass, gCollectionClass, gPIClass, gSettingsClass, gFindTypeMethod);
         }
         pm_refresh_object(gWrapClass, &gWrapObj, &gWrapHandle);
         pm_refresh_object(gCollectionClass, &gCollectionObj, &gCollectionHandle);
         pm_refresh_object(gPIClass, &gPI_Obj, &gPI_Handle);
+        pm_refresh_object(gSettingsClass, &gSettingsObj, &gSettingsHandle);
+
+        BOOL visible = (gSettingsObj != NULL);
+        if (visible != gEntryVisible) {
+            gEntryVisible = visible;
+            PMSetModEntryVisible(visible);
+        }
 
         if (gCollectionObj) pm_apply_collection_overrides(gCollectionObj);
         if (gPI_Obj) pm_apply_playerinfo_overrides(gPI_Obj);
@@ -1013,15 +1044,16 @@ static void pm_runtime_tick(void) {
         }
     }
 
-    // 锁血：血量下降就写回上一次的值
+    // 锁血：保持血量在本局最大值，Miss 也掉不下去
     if (PMLockHP) {
         void *gc = *(void **)((char *)wrap + 0xD8);
         if (gc && gc == gLastGCObj) {
             int life = *(int *)((char *)gc + 0x58);
-            if (gLastLifeValue >= 0 && life < gLastLifeValue) {
-                *(int *)((char *)gc + 0x58) = gLastLifeValue;
-            } else {
+            if (gLastLifeValue < 0) {
                 gLastLifeValue = life;
+            } else {
+                if (life > gLastLifeValue) gLastLifeValue = life;
+                if (life != gLastLifeValue) *(int *)((char *)gc + 0x58) = gLastLifeValue;
             }
         } else {
             gLastGCObj = gc;
