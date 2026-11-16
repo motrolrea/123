@@ -859,6 +859,25 @@ static void pm_apply_playerinfo_overrides(void *self) {
     }
 }
 
+// 主界面左上角「欢迎回来 / 摇光」那一块是 CommonUserInfo（不是 PlayerInfoManager）。
+// 它的评分同样是 savedRating / 100，图标按同一阈值取 sprite。
+static void pm_apply_commonuserinfo_overrides(void *self) {
+    if (!self) return;
+    pm_set_text_at(self, 0x28, @"level");          // levelText
+    NSString *rv = PMProfileValue(@"rating");
+    if (!rv.length) {
+        pm_set_text_at(self, 0x78, @"rating");     // ratingText (TMP)
+        pm_set_text_at(self, 0x80, @"rating");     // ratingSmallText (TMP)
+        return;
+    }
+    int32_t r100 = (int32_t)lround(rv.doubleValue * 100.0);
+    if (*(int32_t *)((char *)self + 0xE4) != r100) {
+        *(int32_t *)((char *)self + 0xE4) = r100;
+        pm_call_obj(self, "UpdateRatingDisplayOnSceneLoad", 0, NULL);
+        PMLog(@"主界面左上角评分已设为 %.2f（图标同步）", r100 / 100.0);
+    }
+}
+
 static void (*orig_CM_RefreshData)(void *) = NULL;
 static void (*orig_CM_RefreshDiff)(void *) = NULL;
 static void (*orig_CM_RefreshGrade)(void *, void *) = NULL;
@@ -1054,6 +1073,9 @@ void PMApplySettingsNow(void) { pm_apply_static_settings(); }
 static Il2CppClass *gWrapClass = NULL;
 static Il2CppClass *gCollectionClass = NULL;
 static Il2CppClass *gPIClass = NULL;
+static Il2CppClass *gCUIClass = NULL;      // 主界面左上角「欢迎回来 / 评分」控件
+static void *gCUI_Obj = NULL;
+static void *gCUI_Handle = NULL;
 static Il2CppClass *gFindTypesHost = NULL;
 static const MethodInfo *gFindTypeMethod = NULL;
 static void *gWrapObj = NULL;
@@ -1562,11 +1584,14 @@ static BOOL pm_build_mod_tab(void *gsp) {
     }
     void *tabParent = pm_call_obj(tabProto, "get_parent", 0, NULL);
     void *viewParent = pm_call_obj(viewProto, "get_parent", 0, NULL);
-    const MethodInfo *mInst = pm_method_nongeneric(gFindTypesHost, "Instantiate", 2);
+    // 这个 Unity 版本里 2 参数的 Instantiate 只有泛型版（<T>），
+    // 没法用 runtime_invoke 调，所以走 3 参数的非泛型 (Object, Transform, bool)。
+    const MethodInfo *mInst = pm_method_nongeneric(gFindTypesHost, "Instantiate", 3);
     if (!pm_ptr_ok(tabParent) || !pm_ptr_ok(viewParent) || !mInst) {
         PMLog(@"Mod页: 容器异常 tabParent=%p viewParent=%p inst=%p", tabParent, viewParent, mInst);
         return NO;
     }
+    static bool gInstInWorld = false;
 
     int32_t nextTab = *(int32_t *)((char *)gsp + 0x20);
     int tabChildren = pm_child_count(tabParent);
@@ -1579,7 +1604,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
     int guard = 0;
     while (tabChildren <= nextTab && guard++ < 8) {
         void *protoGO = pm_call_obj(tabProto, "get_gameObject", 0, NULL);
-        void *ia[2] = {protoGO, tabParent};
+        void *ia[3] = {protoGO, tabParent, &gInstInWorld};
         Il2CppException *ex = NULL;
         il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
         if (ex) { PMLog(@"Mod页: 克隆 Tab 按钮失败 exc=%p", ex); break; }
@@ -1590,7 +1615,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
     guard = 0;
     while (viewChildren <= pn && guard++ < 8) {
         void *protoGO = pm_call_obj(viewProto, "get_gameObject", 0, NULL);
-        void *ia[2] = {protoGO, viewParent};
+        void *ia[3] = {protoGO, viewParent, &gInstInWorld};
         Il2CppException *ex = NULL;
         il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
         if (ex) { PMLog(@"Mod页: 克隆设置页失败 exc=%p", ex); break; }
@@ -1786,6 +1811,8 @@ static void pm_runtime_tick(void) {
         pm_refresh_object(gCollectionClass, &gCollectionObj, &gCollectionHandle);
         pm_refresh_object(gPIClass, &gPI_Obj, &gPI_Handle);
         pm_refresh_object(gSettingsClass, &gSettingsObj, &gSettingsHandle);
+        if (!gCUIClass) gCUIClass = pm_find_class("CommonUserInfo");
+        pm_refresh_object(gCUIClass, &gCUI_Obj, &gCUI_Handle);
 
         pm_sync_prefs();
 
@@ -1793,6 +1820,11 @@ static void pm_runtime_tick(void) {
         if (gPI_Obj && !piLogged) {
             piLogged = YES;
             PMLog(@"PlayerInfoManager 实例 = %p", gPI_Obj);
+        }
+        static BOOL cuiLogged = NO;
+        if (gCUI_Obj && !cuiLogged) {
+            cuiLogged = YES;
+            PMLog(@"CommonUserInfo 实例 = %p", gCUI_Obj);
         }
         // 诊断：游戏角色页自己能列出多少个已解锁角色
         static BOOL charProbed = NO;
@@ -1835,6 +1867,7 @@ static void pm_runtime_tick(void) {
 
         if (gCollectionObj) pm_apply_collection_overrides(gCollectionObj);
         if (gPI_Obj) pm_apply_playerinfo_overrides(gPI_Obj);
+        if (gCUI_Obj) pm_apply_commonuserinfo_overrides(gCUI_Obj);
     }
 
     if (now - gLastSlowTime > 1.5) {
