@@ -426,6 +426,7 @@ typedef struct Il2CppImage Il2CppImage;
 typedef struct Il2CppClass Il2CppClass;
 typedef struct Il2CppObject Il2CppObject;
 typedef struct Il2CppString Il2CppString;
+typedef struct Il2CppType Il2CppType;
 typedef struct Il2CppException Il2CppException;
 typedef struct FieldInfo FieldInfo;
 typedef struct MethodInfo MethodInfo;
