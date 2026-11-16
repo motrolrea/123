@@ -1180,19 +1180,40 @@ static void pm_set_page_title(void *pageGO, void *oldTitle) {
 }
 
 // 扫描现有设置项，拿到官方 TitleCell / ChoiceCell<int> 的具体类
+static BOOL pm_ptr_ok(const void *p) {
+    uintptr_t v = (uintptr_t)p;
+    return v > 0x100000000ULL && (v & 7) == 0;
+}
+
+// 安全读取 Tab.cells，返回数量；-1 表示这个 Tab 指针不可信
+static int pm_tab_cells(void *tab, void ***outItems) {
+    if (!pm_ptr_ok(tab)) return -1;
+    void *cells = *(void **)((char *)tab + 0x28);
+    if (!cells) return 0;
+    if (!pm_ptr_ok(cells)) return -1;
+    int cn = *(int *)((char *)cells + 0x18);
+    if (cn <= 0 || cn > 5000) return 0;
+    void **items = *(void ***)((char *)cells + 0x10);
+    if (!pm_ptr_ok(items)) return 0;
+    if (outItems) *outItems = items;
+    return cn;
+}
+
 static void pm_scan_cell_classes(void *tabs, int tn, void **titems) {
+    int bad = 0;
     for (int i = 0; i < tn; i++) {
-        void *tab = titems[i];
-        void *cells = tab ? *(void **)((char *)tab + 0x28) : NULL;
-        if (!cells) continue;
-        int cn = *(int *)((char *)cells + 0x18);
-        void **citems = *(void ***)((char *)cells + 0x10);
-        if (cn <= 0 || cn > 5000 || !citems) continue;
+        void **citems = NULL;
+        int cn = pm_tab_cells(titems[i], &citems);
+        if (cn < 0) {
+            if (bad++ < 3) PMLog(@"Mod页: tab[%d]=%p 指针异常", i, titems[i]);
+            continue;
+        }
+        if (cn == 0) continue;
         for (int j = 0; j < cn; j++) {
             void *cell = citems[j];
-            if (!cell) continue;
+            if (!pm_ptr_ok(cell)) continue;
             Il2CppClass *k = *(Il2CppClass **)cell;
-            if (!k) continue;
+            if (!pm_ptr_ok(k)) continue;
             const char *name = il2cpp_class_get_name(k);
             if (!name) continue;
             if (!gTitleCellClass && strcmp(name, "TitleCell") == 0) gTitleCellClass = k;
@@ -1203,16 +1224,14 @@ static void pm_scan_cell_classes(void *tabs, int tn, void **titems) {
 }
 
 static BOOL pm_tab_has_choice(void *tab) {
-    void *cells = tab ? *(void **)((char *)tab + 0x28) : NULL;
-    if (!cells) return NO;
-    int cn = *(int *)((char *)cells + 0x18);
-    void **citems = *(void ***)((char *)cells + 0x10);
-    if (cn <= 0 || cn > 5000 || !citems) return NO;
+    void **citems = NULL;
+    int cn = pm_tab_cells(tab, &citems);
+    if (cn <= 0) return NO;
     for (int j = 0; j < cn; j++) {
         void *cell = citems[j];
-        if (!cell) continue;
+        if (!pm_ptr_ok(cell)) continue;
         Il2CppClass *k = *(Il2CppClass **)cell;
-        const char *name = k ? il2cpp_class_get_name(k) : NULL;
+        const char *name = pm_ptr_ok(k) ? il2cpp_class_get_name(k) : NULL;
         if (name && strncmp(name, "ChoiceCell", 10) == 0) return YES;
     }
     return NO;
@@ -1220,16 +1239,14 @@ static BOOL pm_tab_has_choice(void *tab) {
 
 // 模板页里是否有标题分区原型（同页必须已经用过 TitleCell，原型才存在）
 static BOOL pm_tab_has_title(void *tab) {
-    void *cells = tab ? *(void **)((char *)tab + 0x28) : NULL;
-    if (!cells) return NO;
-    int cn = *(int *)((char *)cells + 0x18);
-    void **citems = *(void ***)((char *)cells + 0x10);
-    if (cn <= 0 || cn > 5000 || !citems) return NO;
+    void **citems = NULL;
+    int cn = pm_tab_cells(tab, &citems);
+    if (cn <= 0) return NO;
     for (int j = 0; j < cn; j++) {
         void *cell = citems[j];
-        if (!cell) continue;
+        if (!pm_ptr_ok(cell)) continue;
         Il2CppClass *k = *(Il2CppClass **)cell;
-        const char *name = k ? il2cpp_class_get_name(k) : NULL;
+        const char *name = pm_ptr_ok(k) ? il2cpp_class_get_name(k) : NULL;
         if (name && strcmp(name, "TitleCell") == 0) return YES;
     }
     return NO;
@@ -1255,18 +1272,22 @@ static BOOL pm_build_mod_tab(void *gsp) {
     if (patchedGsp == gsp) return YES;   // 同一个设置面板只注册一次
     void *tabs = *(void **)((char *)gsp + 0x40);
     void *pages = *(void **)((char *)gsp + 0x58);
-    if (!tabs || !pages) {
-        PMLog(@"Mod页: 面板字段异常 tabs=%p pages=%p", tabs, pages);
+    if (!pm_ptr_ok(tabs) || !pm_ptr_ok(pages)) {
+        PMLog(@"Mod页: 面板字段异常 gsp=%p tabs=%p pages=%p", gsp, tabs, pages);
         return NO;
     }
     int tn = *(int *)((char *)tabs + 0x18);
     void **titems = *(void ***)((char *)tabs + 0x10);
-    if (tn <= 0 || tn > 200 || !titems) {
-        PMLog(@"Mod页: tabs 数量异常 %d", tn);
+    if (tn <= 0 || tn > 200 || !pm_ptr_ok(titems)) {
+        PMLog(@"Mod页: tabs 数量异常 %d items=%p", tn, titems);
         return NO;
     }
+    PMLog(@"Mod页: 开始注入 gsp=%p tabs=%d pages=%d", gsp, tn, *(int *)((char *)pages + 0x18));
 
-    if (!gTabClass && titems[0]) gTabClass = *(Il2CppClass **)titems[0];
+    if (!gTabClass && pm_ptr_ok(titems[0])) {
+        Il2CppClass *k0 = *(Il2CppClass **)titems[0];
+        if (pm_ptr_ok(k0)) gTabClass = k0;
+    }
     if (!gTabClass) gTabClass = pm_class_in_namespace("Tab", "", "Layout", 5);
     if (!gTabClass) {
         PMLog(@"Mod页: 找不到官方 Tab 类");
@@ -1301,7 +1322,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
     void *srcTr = srcView ? pm_call_obj(srcView, "get_transform", 0, NULL) : NULL;
     void *parentTr = srcTr ? pm_call_obj(srcTr, "get_parent", 0, NULL) : NULL;
     const MethodInfo *mInst = il2cpp_class_get_method_from_name(gFindTypesHost, "Instantiate", 2);
-    if (!srcView || !parentTr || !mInst) {
+    if (!pm_ptr_ok(srcView) || !pm_ptr_ok(parentTr) || !mInst) {
         PMLog(@"Mod页: 模板页异常 view=%p parent=%p", srcView, parentTr);
         return NO;
     }
