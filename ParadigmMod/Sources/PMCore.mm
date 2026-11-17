@@ -2098,7 +2098,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
             {"Rating（0-9999）",     "pm.profile.rating",     0, 9999,       0.5f, 900},
             {"游玩次数（0-999999）",  "pm.profile.playcount",  0, 999999,     1,    1000},
             {"总游玩时间（小时）",     "pm.profile.playtime",   0, 9999,       1,    100},
-            {"总分数（0-999999999）", "pm.profile.totalscore", 0, 999999999,  100,  100000},
+            {"总分数（0-999999999）", "pm.profile.totalscore", 0.0f, 999999999.0f, 100.0f, 100000.0f},
         };
         for (int i = 0; i < 5; i++) {
             void *c = pm_new_numeric_float_cell(frows[i].label, frows[i].key,
