@@ -1538,13 +1538,76 @@ static void pm_list_remove_last(void *list) {
     pm_call_obj(list, "RemoveAt", 1, a);
 }
 
+static BOOL pm_tr_is_clone(void *tr) {
+    void *go = pm_call_obj(tr, "get_gameObject", 0, NULL);
+    void *nm = go ? pm_call_obj(go, "get_name", 0, NULL) : NULL;
+    if (!nm) return NO;
+    char buf[256];
+    pm_il2cpp_string_ascii(nm, buf, sizeof(buf));
+    size_t len = strlen(buf);
+    return len >= 7 && strcmp(buf + len - 7, "(Clone)") == 0;
+}
+
+// 克隆一个官方页后，把页里已经生成的行删掉，只留 cell 原型
+// （Unity 只给克隆出来的那一层加 (Clone)，Viewport/Scrollbar 等结构不会被动到）
+static void pm_clear_cloned_rows(void *pageGO, void *pageTr) {
+    Il2CppClass *trCls = pm_class_any_ns("Transform", "UnityEngine");
+    if (!trCls || !il2cpp_class_get_type || !il2cpp_type_get_object) return;
+    void *typeObj = il2cpp_type_get_object(il2cpp_class_get_type(trCls));
+    if (!typeObj || !pageGO) return;
+    Il2CppClass *goCls = il2cpp_object_get_class((Il2CppObject *)pageGO);
+    if (!goCls) return;
+    const MethodInfo *m = pm_method_nongeneric(goCls, "GetComponentsInChildren", 2);
+    uint8_t inc = 1;
+    void *args[2] = {typeObj, &inc};
+    Il2CppObject *trs = m ? (Il2CppObject *)il2cpp_runtime_invoke(m, pageGO, args, NULL) : NULL;
+    if (!trs) {
+        void *a1[1] = {typeObj};
+        trs = (Il2CppObject *)pm_call_obj(pageGO, "GetComponentsInChildren", 1, a1);
+    }
+    if (!trs) return;
+    int n = *(int *)((char *)trs + 0x18);
+    void **items = *(void ***)((char *)trs + 0x20);
+    if (n <= 0 || n > 20000 || !items) return;
+    int removed = 0;
+    for (int i = 0; i < n; i++) {
+        void *tr = items[i];
+        if (!tr || tr == pageTr) continue;
+        if (!pm_tr_is_clone(tr)) continue;
+        void *parent = pm_call_obj(tr, "get_parent", 0, NULL);
+        if (parent && pm_tr_is_clone(parent)) continue;   // 父级也是克隆，随父一起销毁
+        void *go = pm_call_obj(tr, "get_gameObject", 0, NULL);
+        pm_destroy_go(go);
+        removed++;
+    }
+    PMLog(@"Mod页: 清掉模板页旧行 %d 个", removed);
+}
+
+// 官方设置面板上的 Mod 注册状态（按实例记录，便于面板重建后重新注入）
+static void *gPatchedGsp = NULL;
+static void *gTriedGsp = NULL;
+static int gTriedCount = 0;
+static void *gModTabObj = NULL;
+
+static BOOL pm_panel_has_mod_tab(void *gsp) {
+    if (!pm_ptr_ok(gsp) || !pm_ptr_ok(gModTabObj)) return NO;
+    void *tabs = *(void **)((char *)gsp + 0x40);
+    int n = 0;
+    void **items = pm_list_items(tabs, &n);
+    if (!items) return NO;
+    for (int i = 0; i < n; i++) {
+        if (items[i] == gModTabObj) return YES;
+    }
+    return NO;
+}
+
 // 构建「Mod设置」页：克隆一个官方页做模板，再通过官方 Add() 注册 Tab
 static BOOL pm_build_mod_tab(void *gsp) {
-    static void *patchedGsp = NULL;
-    static int attempts = 0;
     if (!gsp || !gFindTypesHost || !il2cpp_object_new || !il2cpp_array_new) return NO;
-    if (attempts >= 3) return YES;   // 已经试过几次，别无限重试刷垃圾对象
-    attempts++;
+    // 重试计数按「面板实例」算：退出设置再进来游戏会换/重建面板，得能重新注入
+    if (gTriedGsp != gsp) { gTriedGsp = gsp; gTriedCount = 0; }
+    if (gTriedCount >= 6) return YES;
+    gTriedCount++;
     if (pm_panel_score(gsp) <= 0) {
         void *better = pm_find_better_panel(gsp);
         if (better) {
@@ -1552,7 +1615,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
             gsp = better;
         }
     }
-    if (patchedGsp == gsp) return YES;   // 同一个设置面板只注册一次
+    if (gPatchedGsp == gsp) return YES;   // 同一个设置面板只注册一次
     void *tabs = *(void **)((char *)gsp + 0x40);
     void *pages = *(void **)((char *)gsp + 0x58);
     if (!pm_ptr_ok(tabs) || !pm_ptr_ok(pages)) {
@@ -1672,22 +1735,23 @@ static BOOL pm_build_mod_tab(void *gsp) {
     // Tab.Layout 用 GetComponentInChildren 找标题文本和按钮，必须先把按钮激活
     pm_go_set_active(newTabGO, true);
 
-    // 页面：克隆官方页面原型 viewProto（官方建页就是这么做的，
-    // 里面只有 cell 原型、没有已生成的实例行）。注意不要清子物体，
-    // 克隆出来的整个层级名字都带 (Clone)，清一遍会把 cell 容器一起删掉。
+    // 页面：必须克隆一个「已注册的真实页」，因为官方 Tab.Layout 是拿
+    // cells 容器里的原型（下标 1=ChoiceCell、6=TitleCell…）来生成行的；
+    // viewProto 是空模板页，容器里没有原型，会直接 ArgumentOutOfRange。
+    // 克隆后把该页已生成的旧行删掉，只留原型。
     void *clonedPage = NULL;
-    if (pm_ptr_ok(viewProto)) {
-        void *protoGO = pm_call_obj(viewProto, "get_gameObject", 0, NULL);
-        void *ia[3] = {protoGO, viewParent, &gInstInWorld};
+    if (pm_ptr_ok(srcView)) {
+        void *srcGO = pm_call_obj(srcView, "get_gameObject", 0, NULL);
+        void *ia[3] = {srcGO, viewParent, &gInstInWorld};
         Il2CppException *ex = NULL;
         clonedPage = il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
         if (ex || !clonedPage) {
-            pm_log_exc("Mod页: 克隆页面原型", ex);
+            pm_log_exc("Mod页: 克隆模板页", ex);
             clonedPage = NULL;
         }
     }
     if (!clonedPage) {
-        PMLog(@"Mod页: 页面原型不可用 viewProto=%p", viewProto);
+        PMLog(@"Mod页: 模板页不可用 srcView=%p", srcView);
         return NO;
     }
     void *pageTr = pm_call_obj(clonedPage, "get_transform", 0, NULL);
@@ -1696,6 +1760,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
         PMLog(@"Mod页: 取新页失败 page=%p", page);
         return NO;
     }
+    pm_clear_cloned_rows((void *)page, pageTr);
     pm_go_set_active((void *)page, true);
     void *pargs[1] = {pageTr};
     pm_call_obj(pages, "Add", 1, pargs);
@@ -1721,6 +1786,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
         PMLog(@"Mod页: Tab 创建失败 tab=%p ctor=%p", tab, mTabCtor);
         pm_list_remove_last(pages);
         pm_destroy_go((void *)page);
+        pm_go_set_active(newTabGO, false);
         pm_destroy_go(newTabGO);
         return NO;
     }
@@ -1758,6 +1824,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
         PMLog(@"Mod页: 设置项创建失败");
         pm_list_remove_last(pages);
         pm_destroy_go((void *)page);
+        pm_go_set_active(newTabGO, false);
         pm_destroy_go(newTabGO);
         return NO;
     }
@@ -1775,13 +1842,15 @@ static BOOL pm_build_mod_tab(void *gsp) {
         pm_list_remove_last(tabs);
         pm_list_remove_last(pages);
         pm_destroy_go((void *)page);
+        pm_go_set_active(newTabGO, false);
         pm_destroy_go(newTabGO);
         PMLog(@"Mod页: 官方 Add 失败，已回滚本次注入");
         return NO;
     }
     pm_go_set_active((void *)page, false);   // 保持原来的分页状态，等用户点侧栏
 
-    patchedGsp = gsp;
+    gPatchedGsp = gsp;
+    gModTabObj = tab;
     gModPageGO = (void *)page;
     PMLog(@"Mod设置页已注册: page=%d, 行数=%d, 页内子物体=%d, 标题类=%s, 选项类=%s",
           pageIndex, made, pm_child_count(pageTr),
@@ -1939,15 +2008,36 @@ static void pm_runtime_tick(void) {
 
         if (gSettingsObj) {
             static CFTimeInterval lastAttempt = 0;
+            static void *seenPanel = NULL;
+            if (gSettingsObj != seenPanel) {
+                // 游戏重建了设置面板，旧的注册信息全部作废
+                seenPanel = gSettingsObj;
+                gEntryInjected = NO;
+                gSettingsSeenAt = now;
+                gPatchedGsp = NULL;
+                gTriedGsp = NULL;
+                gTriedCount = 0;
+                gModTabObj = NULL;
+                gModPageGO = NULL;
+            }
+            if (gEntryInjected && !pm_panel_has_mod_tab(gSettingsObj)) {
+                PMLog(@"Mod页: 侧栏项已丢失，重新注入");
+                gEntryInjected = NO;
+                gSettingsSeenAt = 0;
+                gPatchedGsp = NULL;
+                gTriedGsp = NULL;
+                gTriedCount = 0;
+                gModTabObj = NULL;
+            }
             if (!gSettingsSeenAt) gSettingsSeenAt = now;
-            if (!gEntryInjected && now - gSettingsSeenAt > 0.5 && now - lastAttempt > 3.0) {
+            if (!gEntryInjected && now - lastAttempt > 0.6) {
                 lastAttempt = now;
                 gEntryVisible = YES;
                 PMSetModEntryVisible(false);
                 if (pm_build_mod_tab(gSettingsObj)) {
                     gEntryInjected = YES;
                 } else {
-                    PMLog(@"Mod设置页注册失败，3 秒后重试");
+                    PMLog(@"Mod设置页注册失败，稍后重试");
                 }
             }
         } else if (gEntryVisible) {
