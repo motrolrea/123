@@ -66,6 +66,8 @@ void PMStartRuntimeFeatures(void);
 void PMShowOverlay(void);
 void PMUpdateOverlay(void);
 void PMUpdateBall(void);
+// 官方「Mod设置」里的「修改」行：弹出系统输入框改资料 / 悬浮球参数
+void PMPromptForModValue(NSString *key);
 void PMSetModEntryVisible(bool visible);
 // screenRect 为 Unity 屏幕坐标（左下原点），由 Overlay 转成 UIKit 坐标
 void PMSetModEntryRect(CGRect screenRect);

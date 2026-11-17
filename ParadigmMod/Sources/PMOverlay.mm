@@ -1111,3 +1111,78 @@ void PMShowOverlay(void) {
 }
 - (void)tick { pm_ball_tick(); }
 @end
+
+#pragma mark - 官方「Mod设置」里的修改行
+
+static UIViewController *pm_top_vc(void) {
+    UIWindow *win = nil;
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+        if (![s isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *w in ((UIWindowScene *)s).windows) {
+            if (w.isKeyWindow) { win = w; break; }
+        }
+        if (win) break;
+    }
+    if (!win) win = UIApplication.sharedApplication.windows.firstObject;
+    UIViewController *vc = win.rootViewController;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    return vc;
+}
+
+void PMPromptForModValue(NSString *key) {
+    if (!key.length) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *title = nil, *cur = @"", *hint = @"";
+        BOOL isProfile = YES;
+        if ([key isEqualToString:@"level"]) {
+            title = @"等级"; cur = PMProfileValue(@"level") ?: @""; hint = @"主界面显示为 Lv.，建议 1-999";
+        } else if ([key isEqualToString:@"rating"]) {
+            title = @"Rating"; cur = PMProfileValue(@"rating") ?: @""; hint = @"例如 900 或 900.50，范围 0-9999";
+        } else if ([key isEqualToString:@"playcount"]) {
+            title = @"游玩次数"; cur = PMProfileValue(@"playcount") ?: @""; hint = @"0-999999";
+        } else if ([key isEqualToString:@"playtime"]) {
+            title = @"总游玩时间（小时）"; cur = PMProfileValue(@"playtime") ?: @""; hint = @"例如 120";
+        } else if ([key isEqualToString:@"totalscore"]) {
+            title = @"总分数"; cur = PMProfileValue(@"totalscore") ?: @""; hint = @"0-999999999";
+        } else if ([key isEqualToString:@"ballsize"]) {
+            title = @"悬浮球大小"; cur = [NSString stringWithFormat:@"%.0f", PMBallSize]; hint = @"24-96"; isProfile = NO;
+        } else if ([key isEqualToString:@"ballalpha"]) {
+            title = @"悬浮球透明度"; cur = [NSString stringWithFormat:@"%.2f", PMBallAlpha]; hint = @"0.2-1.0"; isProfile = NO;
+        }
+        if (!title) return;
+        UIViewController *vc = pm_top_vc();
+        if (!vc) return;
+        UIAlertController *ac = [UIAlertController alertControllerWithTitle:title message:hint
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+        [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+            tf.text = cur;
+            tf.keyboardType = UIKeyboardTypeDecimalPad;
+        }];
+        [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            NSString *t = [ac.textFields.firstObject.text stringByTrimmingCharactersInSet:
+                           NSCharacterSet.whitespaceCharacterSet];
+            if (!t.length) return;
+            NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+            if (isProfile) {
+                if (!PMProfileText) PMProfileText = [NSMutableDictionary dictionary];
+                PMProfileText[key] = t;
+                PMProfileEnabled = YES;
+                [d setObject:t forKey:[@"pm.profile." stringByAppendingString:key]];
+                [d setBool:YES forKey:@"pm.profile.on"];
+            } else if ([key isEqualToString:@"ballsize"]) {
+                float v = MAX(24.0f, MIN(96.0f, t.floatValue));
+                PMBallSize = v;
+                [d setFloat:v forKey:@"pm.ball.size"];
+                PMUpdateBall();
+            } else {
+                float v = MAX(0.2f, MIN(1.0f, t.floatValue));
+                PMBallAlpha = v;
+                [d setFloat:v forKey:@"pm.ball.alpha"];
+                PMUpdateBall();
+            }
+            PMLog(@"Mod设置: %@ = %@", key, t);
+        }]];
+        [vc presentViewController:ac animated:YES completion:nil];
+    });
+}

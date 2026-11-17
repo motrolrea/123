@@ -1259,8 +1259,9 @@ static void *pm_new_title_cell(const char *label) {
     return exc ? NULL : obj;
 }
 
-// 官方 ChoiceCell<int>：两个选项（关/开），结果直接写进 PlayerPrefs
-static void *pm_new_choice_cell(const char *label, const char *prefKey, int def) {
+// 官方 ChoiceCell<int>：两个选项，结果直接写进 PlayerPrefs
+static void *pm_new_choice_cell2(const char *label, const char *prefKey, int def,
+                                 const char *l0, const char *l1) {
     if (!gChoiceCellClass || !il2cpp_object_new) return NULL;
     void *obj = il2cpp_object_new(gChoiceCellClass);
     const MethodInfo *m = il2cpp_class_get_method_from_name(gChoiceCellClass, ".ctor", 6);
@@ -1269,7 +1270,7 @@ static void *pm_new_choice_cell(const char *label, const char *prefKey, int def)
     Il2CppString *t = il2cpp_string_new("");
     Il2CppString *k = il2cpp_string_new(prefKey);
     int32_t d = def;
-    const char *labels[2] = {"关闭", "开启"};
+    const char *labels[2] = {l0, l1};
     int vals[2] = {0, 1};
     Il2CppObject *la = pm_make_string_array(labels, 2);
     Il2CppObject *va = pm_make_int_array(vals, 2);
@@ -1278,6 +1279,10 @@ static void *pm_new_choice_cell(const char *label, const char *prefKey, int def)
     Il2CppException *exc = NULL;
     il2cpp_runtime_invoke(m, obj, args, &exc);
     return exc ? NULL : obj;
+}
+
+static void *pm_new_choice_cell(const char *label, const char *prefKey, int def) {
+    return pm_new_choice_cell2(label, prefKey, def, "关闭", "开启");
 }
 
 static void pm_log_exc(const char *tag, void *exc);
@@ -1656,25 +1661,51 @@ static int gTriedCount = 0;
 static void *gModTabObj = NULL;
 static void *gModTabGO = NULL;   // 侧栏 Mod设置 按钮的 GameObject
 
-// 官方只在点击时批量把 TabActive 置 false，面板重建/动画残留时会漏；
-// 我们的页处于选中态时再兜底清一次，避免两个侧栏项同时高亮
+// 官方点击时只批量关一次 TabActive，面板重建/动画残留会漏；
+// 只要我们的页处于选中态，就把其它侧栏项逐个 SetActive(false)，再把自己点亮
 static void pm_keep_mod_tab_selected(void *gsp) {
     if (!pm_ptr_ok(gsp) || !pm_ptr_ok(gModTabGO)) return;
     Il2CppClass *animCls = pm_class_any_ns("Animator", "UnityEngine");
-    if (!animCls || !il2cpp_class_get_type || !il2cpp_type_get_object) return;
-    void *t = il2cpp_type_get_object(il2cpp_class_get_type(animCls));
-    if (!t) return;
-    void *a[1] = {t};
-    void *anim = pm_call_obj(gModTabGO, "GetComponent", 1, a);
-    if (!anim) return;
-    Il2CppString *key = il2cpp_string_new("TabActive");
-    void *gargs[1] = {key};
-    void *boxed = pm_call_obj(anim, "GetBool", 1, gargs);
-    if (!boxed || !*(uint8_t *)((char *)boxed + 0x10)) return;
-    pm_call_obj(gsp, "SetAllTabsInactive", 0, NULL);
-    uint8_t b = 1;
-    void *sargs[2] = {key, &b};
-    pm_call_obj(anim, "SetBool", 2, sargs);
+    void *anim = NULL;
+    if (animCls && il2cpp_class_get_type && il2cpp_type_get_object) {
+        void *t = il2cpp_type_get_object(il2cpp_class_get_type(animCls));
+        if (t) {
+            void *a[1] = {t};
+            anim = pm_call_obj(gModTabGO, "GetComponent", 1, a);
+        }
+    }
+    BOOL mine = NO;
+    if (pm_ptr_ok(gModPageGO)) {
+        void *a = pm_call_obj(gModPageGO, "get_activeSelf", 0, NULL);
+        if (a && *(uint8_t *)((char *)a + 0x10)) mine = YES;
+    }
+    if (!mine && anim) {
+        Il2CppString *key = il2cpp_string_new("TabActive");
+        void *gargs[1] = {key};
+        void *boxed = pm_call_obj(anim, "GetBool", 1, gargs);
+        if (boxed && *(uint8_t *)((char *)boxed + 0x10)) mine = YES;
+    }
+    if (!mine) return;
+    void *tabs = *(void **)((char *)gsp + 0x40);
+    int n = 0;
+    void **items = pm_list_items(tabs, &n);
+    static BOOL logged = NO;
+    if (!logged) {
+        logged = YES;
+        PMLog(@"Mod页: 选中态兜底 tab=%p anim=%p tabs=%d", gModTabGO, anim, n);
+    }
+    for (int i = 0; i < n && items; i++) {
+        if (!pm_ptr_ok(items[i]) || items[i] == gModTabObj) continue;
+        uint8_t f = 0;
+        void *a[1] = {&f};
+        pm_call_obj(items[i], "SetActive", 1, a);
+    }
+    if (anim) {
+        Il2CppString *key = il2cpp_string_new("TabActive");
+        uint8_t b = 1;
+        void *sargs[2] = {key, &b};
+        pm_call_obj(anim, "SetBool", 2, sargs);
+    }
 }
 
 static BOOL pm_panel_has_mod_tab(void *gsp) {
@@ -1980,51 +2011,35 @@ static BOOL pm_build_mod_tab(void *gsp) {
         if (cell) { pm_tab_add_cell(tab, cell); made++; }
     }
 
-    // 资料数值 / 悬浮球外观：用官方 NumericCell*（formatter 借用官方实例上的委托）
+    // 资料 / 悬浮球外观：官方设置里没有文本输入控件，这里做成「修改」行，
+    // 点一下由 mod 弹出系统输入框，值直接写进真实存储（不再借用官方 formatter）
+    if (srcHasTitle && gTitleCellClass) pm_tab_add_cell(tab, pm_new_title_cell("资料"));
+    struct { const char *label; const char *key; } acts[] = {
+        {"等级（1-999）",        "level"},
+        {"Rating（0-9999）",     "rating"},
+        {"游玩次数（0-999999）",  "playcount"},
+        {"总游玩时间（小时）",     "playtime"},
+        {"总分数（0-999999999）", "totalscore"},
+    };
     int numMade = 0;
-    if ((gNumIntClass && gNumIntFmt) || (gNumFloatClass && gNumFloatFmt)) {
-        if (srcHasTitle && gTitleCellClass) pm_tab_add_cell(tab, pm_new_title_cell("资料"));
+    for (int i = 0; i < 5; i++) {
+        char pk[64];
+        snprintf(pk, sizeof(pk), "pm.action.%s", acts[i].key);
+        void *c = pm_new_choice_cell2(acts[i].label, pk, 0, "—", "修改");
+        if (c) { pm_tab_add_cell(tab, c); numMade++; }
     }
-    if (gNumIntClass && gNumIntFmt) {
-        struct { const char *label; const char *key; int lo, hi, step, def; } irows[] = {
-            {"等级",    "pm.profile.level",      1, 999,      5,    100},
-            {"游玩次数",  "pm.profile.playcount",  0, 200000,   100,  1000},
-            {"总分数",   "pm.profile.totalscore", 0, 99999999, 1000, 100000},
-        };
-        for (int i = 0; i < 3; i++) {
-            void *c = pm_new_numeric_int_cell(irows[i].label, irows[i].key,
-                                              irows[i].lo, irows[i].hi, irows[i].step, irows[i].def);
-            if (c) { pm_tab_add_cell(tab, c); numMade++; }
-            else PMLog(@"Mod页: 整数行创建失败 %s", irows[i].key);
-        }
+    if (srcHasTitle && gTitleCellClass) pm_tab_add_cell(tab, pm_new_title_cell("悬浮球外观"));
+    struct { const char *label; const char *key; } bacts[] = {
+        {"悬浮球大小（24-96）",   "ballsize"},
+        {"悬浮球透明度（0.2-1）", "ballalpha"},
+    };
+    for (int i = 0; i < 2; i++) {
+        char pk[64];
+        snprintf(pk, sizeof(pk), "pm.action.%s", bacts[i].key);
+        void *c = pm_new_choice_cell2(bacts[i].label, pk, 0, "—", "修改");
+        if (c) { pm_tab_add_cell(tab, c); numMade++; }
     }
-    if (gNumFloatClass && gNumFloatFmt) {
-        struct { const char *label; const char *key; float lo, hi, step, def; } frows[] = {
-            {"Rating",       "pm.profile.rating",   0, 9999, 0.5f, 900},
-            {"总游玩时间（小时）", "pm.profile.playtime", 0, 2000, 0.5f, 100},
-        };
-        for (int i = 0; i < 2; i++) {
-            void *c = pm_new_numeric_float_cell(frows[i].label, frows[i].key,
-                                                frows[i].lo, frows[i].hi, frows[i].step, frows[i].def);
-            if (c) { pm_tab_add_cell(tab, c); numMade++; }
-            else PMLog(@"Mod页: 浮点行创建失败 %s", frows[i].key);
-        }
-        if (srcHasTitle && gTitleCellClass) pm_tab_add_cell(tab, pm_new_title_cell("悬浮球外观"));
-        struct { const char *label; const char *key; float lo, hi, step, def; } brows[] = {
-            {"悬浮球大小",   "pm.ball.size",  24.0f, 96.0f, 4.0f,  56.0f},
-            {"悬浮球透明度", "pm.ball.alpha", 0.2f,  1.0f,  0.1f,  0.85f},
-        };
-        for (int i = 0; i < 2; i++) {
-            void *c = pm_new_numeric_float_cell(brows[i].label, brows[i].key,
-                                                brows[i].lo, brows[i].hi, brows[i].step, brows[i].def);
-            if (c) { pm_tab_add_cell(tab, c); numMade++; }
-            else PMLog(@"Mod页: 浮点行创建失败 %s", brows[i].key);
-        }
-    }
-    if (gNumIntClass || gNumFloatClass) {
-        PMLog(@"Mod页: 数值行 %d 个 (int类=%s float类=%s)", numMade,
-              gNumIntClass ? "有" : "无", gNumFloatClass ? "有" : "无");
-    }
+    PMLog(@"Mod页: 修改行 %d 个", numMade);
     if (made == 0) {
         PMLog(@"Mod页: 设置项创建失败");
         pm_list_remove_last(pages);
@@ -2120,6 +2135,33 @@ static float pm_pref_float(const char *key, float def) {
     return *(float *)((char *)boxed + 0x10);
 }
 
+static void pm_pref_set_int(const char *key, int v) {
+    static const MethodInfo *m = NULL;
+    if (!m) {
+        Il2CppClass *pp = pm_class_in_namespace("PlayerPrefs", "UnityEngine", "SetInt", 2);
+        if (pp) m = il2cpp_class_get_method_from_name(pp, "SetInt", 2);
+        if (!m) return;
+    }
+    Il2CppString *s = il2cpp_string_new(key);
+    int32_t val = v;
+    void *args[2] = {s, &val};
+    il2cpp_runtime_invoke(m, NULL, args, NULL);
+}
+
+// 「修改」行点开后由 Overlay 弹输入框，这里只负责把动作位复位，避免重复弹
+static void pm_handle_mod_actions(void) {
+    static const char *keys[] = {"level", "rating", "playcount", "playtime",
+                                 "totalscore", "ballsize", "ballalpha"};
+    for (int i = 0; i < 7; i++) {
+        char k[64];
+        snprintf(k, sizeof(k), "pm.action.%s", keys[i]);
+        if (!pm_pref_has_key(k)) continue;
+        if (pm_pref_int(k, 0) != 1) continue;
+        pm_pref_set_int(k, 0);
+        PMPromptForModValue([NSString stringWithUTF8String:keys[i]]);
+    }
+}
+
 static void pm_set_profile_value(NSString *key, NSString *val) {
     if (!key || !val.length) return;
     if (!PMProfileText) PMProfileText = [NSMutableDictionary dictionary];
@@ -2206,6 +2248,7 @@ static void pm_sync_prefs(void) {
         if (fabsf(v - PMBallAlpha) > 0.005f) { PMBallAlpha = v; ballChanged = YES; }
     }
     pm_sync_profile_edits();
+    pm_handle_mod_actions();
     if (!inited) {
         inited = YES;
         PMLog(@"设置已同步 (auto=%d ap=%d hp=%d bar=%d unlock=%d)",
