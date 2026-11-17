@@ -5,7 +5,28 @@
 #import "PMCommon.h"
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
 #include <math.h>
+
+// ---------------------------------------------------------------------------
+// 打歌时防止误触 iOS 边缘手势（上划回主屏 / 下拉控制中心）
+// iOS 11+ 的做法：让 UIViewController 声明「边缘手势需要二次滑动」，
+// 并隐藏 home indicator；这样第一次滑动只会出现小提示条，不会直接生效。
+// ---------------------------------------------------------------------------
+static UIRectEdge pm_vc_edges(id self, SEL _cmd) { return UIRectEdgeAll; }
+static BOOL pm_vc_home_indicator(id self, SEL _cmd) { return YES; }
+
+static void pm_install_gesture_guards(void) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    Class cls = [UIViewController class];
+    Method m1 = class_getInstanceMethod(cls, NSSelectorFromString(@"preferredScreenEdgesDeferringSystemGestures"));
+    if (m1) method_setImplementation(m1, (IMP)pm_vc_edges);
+    Method m2 = class_getInstanceMethod(cls, NSSelectorFromString(@"prefersHomeIndicatorAutoHidden"));
+    if (m2) method_setImplementation(m2, (IMP)pm_vc_home_indicator);
+    PMLog(@"已启用边缘手势延迟（防划出屏幕 / 下拉控制中心）");
+}
 
 typedef NS_ENUM(NSInteger, PMRowTag) {
     PMRowAutoPlay = 100,
@@ -1008,6 +1029,7 @@ static BOOL pm_in_gameplay(void) {
 }
 
 static int pm_desired_ball_mode(void) {
+    if (PMBallHidden) return 0;
     BOOL autoHide = PMAutoHideInGame && pm_in_gameplay();
     if (autoHide) return 0;
     return PMBallVisible ? 1 : 2;
@@ -1070,6 +1092,7 @@ void PMShowOverlay(void) {
             gBallWindow.rootViewController = root;
             PMLog(@"悬浮球已创建");
         }
+        pm_install_gesture_guards();
         PMUpdateBall();
         if (!timerStarted) {
             timerStarted = YES;

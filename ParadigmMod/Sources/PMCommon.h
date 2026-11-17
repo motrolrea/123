@@ -38,6 +38,7 @@ NSString *PMProfileValue(NSString *key);
 
 // 悬浮球
 extern bool PMBallVisible;
+extern bool PMBallHidden;   // 完全隐藏（连边缘小点也不显示）
 extern float PMBallAlpha;
 extern float PMBallSize;
 

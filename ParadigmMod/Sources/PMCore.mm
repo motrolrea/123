@@ -65,6 +65,7 @@ bool PMProfileEnabled = false;
 NSMutableDictionary<NSString *, NSString *> *PMProfileText = nil;
 
 bool PMBallVisible = true;
+bool PMBallHidden = false;
 float PMBallAlpha = 0.85f;
 float PMBallSize = 56.0f;
 
@@ -1198,6 +1199,10 @@ static CFTimeInterval gSettingsSeenAt = 0;
 static Il2CppClass *gTabClass = NULL;
 static Il2CppClass *gTitleCellClass = NULL;
 static Il2CppClass *gChoiceCellClass = NULL;
+static Il2CppClass *gNumIntClass = NULL;   // GenericSettingsPanel.NumericCellInt
+static void *gNumIntFmt = NULL;            // 它的 Func<int,string>（官方实例上借来用）
+static Il2CppClass *gNumFloatClass = NULL; // GenericSettingsPanel.NumericCellFloat
+static void *gNumFloatFmt = NULL;          // 它的 Func<float,string>
 static const MethodInfo *gPrefGetIntM = NULL;
 
 // ---- 在官方设置里注册一个真正的「Mod设置」页（复用官方 Tab / Cell 控件） ----
@@ -1275,6 +1280,46 @@ static void *pm_new_choice_cell(const char *label, const char *prefKey, int def)
     return exc ? NULL : obj;
 }
 
+static void pm_log_exc(const char *tag, void *exc);
+
+// 官方 NumericCellInt：带 -/+ 的整数行（formatter 借用官方实例上的委托）
+static void *pm_new_numeric_int_cell(const char *label, const char *prefKey,
+                                     int lower, int upper, int step, int def) {
+    if (!gNumIntClass || !gNumIntFmt || !il2cpp_object_new) return NULL;
+    const MethodInfo *m = il2cpp_class_get_method_from_name(gNumIntClass, ".ctor", 8);
+    void *obj = m ? il2cpp_object_new(gNumIntClass) : NULL;
+    if (!obj) return NULL;
+    Il2CppString *l = il2cpp_string_new(label);
+    Il2CppString *t = il2cpp_string_new("");
+    Il2CppString *k = il2cpp_string_new(prefKey);
+    int a = lower, b = upper, c = step, d = def;
+    void *args[8] = {l, t, k, &a, &b, &c, &d, gNumIntFmt};
+    Il2CppException *exc = NULL;
+    il2cpp_runtime_invoke(m, obj, args, &exc);
+    if (exc) { pm_log_exc("NumericCellInt", exc); return NULL; }
+    return obj;
+}
+
+// 官方 NumericCellFloat：带滑条的浮点行
+static void *pm_new_numeric_float_cell(const char *label, const char *prefKey,
+                                       float lower, float upper, float step, float def) {
+    if (!gNumFloatClass || !gNumFloatFmt || !il2cpp_object_new) return NULL;
+    const MethodInfo *m = il2cpp_class_get_method_from_name(gNumFloatClass, ".ctor", 11);
+    void *obj = m ? il2cpp_object_new(gNumFloatClass) : NULL;
+    if (!obj) return NULL;
+    Il2CppString *l = il2cpp_string_new(label);
+    Il2CppString *t = il2cpp_string_new("");
+    Il2CppString *k = il2cpp_string_new(prefKey);
+    float a = lower, b = upper, c = step, d = def, sens = 1.0f;
+    Il2CppString *lh = il2cpp_string_new("-");
+    Il2CppString *uh = il2cpp_string_new("+");
+    void *args[11] = {l, t, k, &a, &b, &c, &d, gNumFloatFmt, lh, uh, &sens};
+    Il2CppException *exc = NULL;
+    il2cpp_runtime_invoke(m, obj, args, &exc);
+    if (exc) { pm_log_exc("NumericCellFloat", exc); return NULL; }
+    return obj;
+}
+
 // 把页面大标题文本改成「Mod设置」
 static void pm_set_page_title(void *pageGO, void *oldTitle) {
     if (!oldTitle) return;
@@ -1349,7 +1394,53 @@ static void pm_scan_cell_classes(void *tabs, int tn, void **titems) {
             if (!name) continue;
             if (!gTitleCellClass && strcmp(name, "TitleCell") == 0) gTitleCellClass = k;
             if (!gChoiceCellClass && strncmp(name, "ChoiceCell", 10) == 0) gChoiceCellClass = k;
-            if (gTitleCellClass && gChoiceCellClass) return;
+            if (!gNumIntClass && strcmp(name, "NumericCellInt") == 0) {
+                void *fmt = *(void **)((char *)cell + 0x68);
+                if (pm_ptr_ok(fmt)) { gNumIntClass = k; gNumIntFmt = fmt; }
+            }
+            if (!gNumFloatClass && strcmp(name, "NumericCellFloat") == 0) {
+                void *fmt = *(void **)((char *)cell + 0x60);
+                if (pm_ptr_ok(fmt)) { gNumFloatClass = k; gNumFloatFmt = fmt; }
+            }
+            if (gTitleCellClass && gChoiceCellClass && gNumIntClass && gNumFloatClass) return;
+        }
+    }
+}
+
+// 官方「打击音量」那一行的上限改成 150（用 prefKey 里的 hit 来认，label 是中文没法匹配）
+static void pm_raise_hit_volume_cap(void *tabs, int tn, void **titems) {
+    for (int i = 0; i < tn; i++) {
+        void **citems = NULL;
+        int cn = pm_tab_cells(titems[i], &citems);
+        if (cn <= 0) continue;
+        for (int j = 0; j < cn; j++) {
+            void *cell = citems[j];
+            if (!pm_ptr_ok(cell)) continue;
+            Il2CppClass *k = il2cpp_object_get_class((Il2CppObject *)cell);
+            const char *name = k ? il2cpp_class_get_name(k) : NULL;
+            if (!name || strncmp(name, "NumericCell", 11) != 0) continue;
+            void *pk = *(void **)((char *)cell + 0x38);
+            char buf[160] = {0};
+            if (!pk) continue;
+            pm_il2cpp_string_ascii(pk, buf, sizeof(buf));
+            if (!buf[0]) continue;
+            if (!pm_contains_ci(buf, "hit")) {
+                PMLog(@"Mod页: 数值行 %s (%s)", name, buf);
+                continue;
+            }
+            if (strstr(name, "Float") || strstr(name, "Slide")) {
+                float *up = (float *)((char *)cell + 0x48);
+                if (*up < 1.5f) {
+                    *up = 1.5f;
+                    PMLog(@"Mod页: %s 上限 -> 150%% (%s)", name, buf);
+                }
+            } else {
+                int32_t *up = (int32_t *)((char *)cell + 0x48);
+                if (*up < 150) {
+                    *up = 150;
+                    PMLog(@"Mod页: %s 上限 -> 150 (%s)", name, buf);
+                }
+            }
         }
     }
 }
@@ -1563,6 +1654,28 @@ static void *gPatchedGsp = NULL;
 static void *gTriedGsp = NULL;
 static int gTriedCount = 0;
 static void *gModTabObj = NULL;
+static void *gModTabGO = NULL;   // 侧栏 Mod设置 按钮的 GameObject
+
+// 官方只在点击时批量把 TabActive 置 false，面板重建/动画残留时会漏；
+// 我们的页处于选中态时再兜底清一次，避免两个侧栏项同时高亮
+static void pm_keep_mod_tab_selected(void *gsp) {
+    if (!pm_ptr_ok(gsp) || !pm_ptr_ok(gModTabGO)) return;
+    Il2CppClass *animCls = pm_class_any_ns("Animator", "UnityEngine");
+    if (!animCls || !il2cpp_class_get_type || !il2cpp_type_get_object) return;
+    void *t = il2cpp_type_get_object(il2cpp_class_get_type(animCls));
+    if (!t) return;
+    void *a[1] = {t};
+    void *anim = pm_call_obj(gModTabGO, "GetComponent", 1, a);
+    if (!anim) return;
+    Il2CppString *key = il2cpp_string_new("TabActive");
+    void *gargs[1] = {key};
+    void *boxed = pm_call_obj(anim, "GetBool", 1, gargs);
+    if (!boxed || !*(uint8_t *)((char *)boxed + 0x10)) return;
+    pm_call_obj(gsp, "SetAllTabsInactive", 0, NULL);
+    uint8_t b = 1;
+    void *sargs[2] = {key, &b};
+    pm_call_obj(anim, "SetBool", 2, sargs);
+}
 
 static BOOL pm_panel_has_mod_tab(void *gsp) {
     if (!pm_ptr_ok(gsp) || !pm_ptr_ok(gModTabObj)) return NO;
@@ -1688,7 +1801,10 @@ static BOOL pm_build_mod_tab(void *gsp) {
         PMLog(@"Mod页: 找不到官方 Tab 类");
         return NO;
     }
-    if (!gTitleCellClass || !gChoiceCellClass) pm_scan_cell_classes(tabs, tn, titems);
+    if (!gTitleCellClass || !gChoiceCellClass || !gNumIntClass || !gNumFloatClass) {
+        pm_scan_cell_classes(tabs, tn, titems);
+    }
+    if (gTriedCount == 1) pm_raise_hit_volume_cap(tabs, tn, titems);
     if (!gChoiceCellClass) {
         PMLog(@"Mod页: 找不到官方 ChoiceCell 类");
         return NO;
@@ -1851,6 +1967,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
         {NULL,   "挑战解锁",          "pm.coll.challenge", 0},
         {"网络", "屏蔽成绩上传",        "pm.block",          0},
         {"悬浮球", "显示悬浮球",        "pm.ball.show",      1},
+        {NULL,   "完全隐藏悬浮球",      "pm.ball.hide",      0},
         {NULL,   "游玩时自动隐藏",      "pm.ball.auto",      1},
     };
     int count = (int)(sizeof(rows) / sizeof(rows[0]));
@@ -1861,6 +1978,52 @@ static BOOL pm_build_mod_tab(void *gsp) {
         }
         void *cell = pm_new_choice_cell(rows[i].label, rows[i].key, rows[i].def);
         if (cell) { pm_tab_add_cell(tab, cell); made++; }
+    }
+
+    // 资料数值 / 悬浮球外观：用官方 NumericCell*（formatter 借用官方实例上的委托）
+    int numMade = 0;
+    if ((gNumIntClass && gNumIntFmt) || (gNumFloatClass && gNumFloatFmt)) {
+        if (srcHasTitle && gTitleCellClass) pm_tab_add_cell(tab, pm_new_title_cell("资料"));
+    }
+    if (gNumIntClass && gNumIntFmt) {
+        struct { const char *label; const char *key; int lo, hi, step, def; } irows[] = {
+            {"等级",    "pm.profile.level",      1, 999,      5,    100},
+            {"游玩次数",  "pm.profile.playcount",  0, 200000,   100,  1000},
+            {"总分数",   "pm.profile.totalscore", 0, 99999999, 1000, 100000},
+        };
+        for (int i = 0; i < 3; i++) {
+            void *c = pm_new_numeric_int_cell(irows[i].label, irows[i].key,
+                                              irows[i].lo, irows[i].hi, irows[i].step, irows[i].def);
+            if (c) { pm_tab_add_cell(tab, c); numMade++; }
+            else PMLog(@"Mod页: 整数行创建失败 %s", irows[i].key);
+        }
+    }
+    if (gNumFloatClass && gNumFloatFmt) {
+        struct { const char *label; const char *key; float lo, hi, step, def; } frows[] = {
+            {"Rating",       "pm.profile.rating",   0, 9999, 0.5f, 900},
+            {"总游玩时间（小时）", "pm.profile.playtime", 0, 2000, 0.5f, 100},
+        };
+        for (int i = 0; i < 2; i++) {
+            void *c = pm_new_numeric_float_cell(frows[i].label, frows[i].key,
+                                                frows[i].lo, frows[i].hi, frows[i].step, frows[i].def);
+            if (c) { pm_tab_add_cell(tab, c); numMade++; }
+            else PMLog(@"Mod页: 浮点行创建失败 %s", frows[i].key);
+        }
+        if (srcHasTitle && gTitleCellClass) pm_tab_add_cell(tab, pm_new_title_cell("悬浮球外观"));
+        struct { const char *label; const char *key; float lo, hi, step, def; } brows[] = {
+            {"悬浮球大小",   "pm.ball.size",  24.0f, 96.0f, 4.0f,  56.0f},
+            {"悬浮球透明度", "pm.ball.alpha", 0.2f,  1.0f,  0.1f,  0.85f},
+        };
+        for (int i = 0; i < 2; i++) {
+            void *c = pm_new_numeric_float_cell(brows[i].label, brows[i].key,
+                                                brows[i].lo, brows[i].hi, brows[i].step, brows[i].def);
+            if (c) { pm_tab_add_cell(tab, c); numMade++; }
+            else PMLog(@"Mod页: 浮点行创建失败 %s", brows[i].key);
+        }
+    }
+    if (gNumIntClass || gNumFloatClass) {
+        PMLog(@"Mod页: 数值行 %d 个 (int类=%s float类=%s)", numMade,
+              gNumIntClass ? "有" : "无", gNumFloatClass ? "有" : "无");
     }
     if (made == 0) {
         PMLog(@"Mod页: 设置项创建失败");
@@ -1894,6 +2057,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
 
     gPatchedGsp = gsp;
     gModTabObj = tab;
+    gModTabGO = newTabGO;
     gModPageGO = (void *)page;
     PMLog(@"Mod设置页已注册: page=%d, 行数=%d, 页内子物体=%d, 标题类=%s, 选项类=%s",
           pageIndex, made, pm_child_count(pageTr),
@@ -1941,6 +2105,56 @@ static BOOL pm_pref_has_key(const char *key) {
     return *(uint8_t *)((char *)boxed + 0x10) != 0;
 }
 
+static float pm_pref_float(const char *key, float def) {
+    static const MethodInfo *m = NULL;
+    if (!m) {
+        Il2CppClass *pp = pm_class_in_namespace("PlayerPrefs", "UnityEngine", "GetFloat", 2);
+        if (pp) m = il2cpp_class_get_method_from_name(pp, "GetFloat", 2);
+        if (!m) return def;
+    }
+    Il2CppString *s = il2cpp_string_new(key);
+    float d = def;
+    void *args[2] = {s, &d};
+    Il2CppObject *boxed = il2cpp_runtime_invoke(m, NULL, args, NULL);
+    if (!boxed) return def;
+    return *(float *)((char *)boxed + 0x10);
+}
+
+static void pm_set_profile_value(NSString *key, NSString *val) {
+    if (!key || !val.length) return;
+    if (!PMProfileText) PMProfileText = [NSMutableDictionary dictionary];
+    NSString *old = PMProfileText[key];
+    if (old && [old isEqualToString:val]) return;
+    PMProfileText[key] = val;
+    PMProfileEnabled = YES;
+}
+
+// 官方「Mod设置」里的资料数值行写在 PlayerPrefs，这里同步到资料覆盖表
+static void pm_sync_profile_edits(void) {
+    if (!pm_pref_has_key("pm.profile.level") && !pm_pref_has_key("pm.profile.rating")) return;
+    static BOOL logged = NO;
+    if (pm_pref_has_key("pm.profile.level")) {
+        pm_set_profile_value(@"level", [NSString stringWithFormat:@"%d", pm_pref_int("pm.profile.level", 1)]);
+    }
+    if (pm_pref_has_key("pm.profile.rating")) {
+        pm_set_profile_value(@"rating", [NSString stringWithFormat:@"%.2f", pm_pref_float("pm.profile.rating", 900.0f)]);
+    }
+    if (pm_pref_has_key("pm.profile.playcount")) {
+        pm_set_profile_value(@"playcount", [NSString stringWithFormat:@"%d", pm_pref_int("pm.profile.playcount", 0)]);
+    }
+    if (pm_pref_has_key("pm.profile.playtime")) {
+        pm_set_profile_value(@"playtime", [NSString stringWithFormat:@"%.0f", pm_pref_float("pm.profile.playtime", 0.0f)]);
+    }
+    if (pm_pref_has_key("pm.profile.totalscore")) {
+        pm_set_profile_value(@"totalscore", [NSString stringWithFormat:@"%d", pm_pref_int("pm.profile.totalscore", 0)]);
+    }
+    if (!logged) {
+        logged = YES;
+        PMLog(@"资料数值已从官方设置同步: level=%@ rating=%@",
+              PMProfileValue(@"level") ?: @"-", PMProfileValue(@"rating") ?: @"-");
+    }
+}
+
 static void pm_sync_prefs(void) {
     if (!gPrefGetIntM) {
         Il2CppClass *pp = pm_class_in_namespace("PlayerPrefs", "UnityEngine", "GetInt", 2);
@@ -1964,6 +2178,7 @@ static void pm_sync_prefs(void) {
         {"pm.coll.challenge",  0, -99999, &PMUnlockChallenges},
         {"pm.block",           0, -99999, &PMBlockUpload},
         {"pm.ball.show",       1, -99999, &PMBallVisible},
+        {"pm.ball.hide",       0, -99999, &PMBallHidden},
         {"pm.ball.auto",       1, -99999, &PMAutoHideInGame},
     };
     static BOOL inited = NO;
@@ -1975,9 +2190,22 @@ static void pm_sync_prefs(void) {
         int v = pm_pref_int(map[i].key, map[i].def);
         if (v == map[i].last) continue;
         map[i].last = v;
-        if (map[i].target == &PMBallVisible || map[i].target == &PMAutoHideInGame) ballChanged = YES;
+        if (map[i].target == &PMBallVisible || map[i].target == &PMBallHidden ||
+            map[i].target == &PMAutoHideInGame) ballChanged = YES;
         *map[i].target = (v != 0);
     }
+    // 悬浮球大小 / 透明度：官方 float 行写的是 PlayerPrefs 的 float
+    if (pm_pref_has_key("pm.ball.size")) {
+        float v = pm_pref_float("pm.ball.size", PMBallSize);
+        v = MAX(24.0f, MIN(96.0f, v));
+        if (fabsf(v - PMBallSize) > 0.01f) { PMBallSize = v; ballChanged = YES; }
+    }
+    if (pm_pref_has_key("pm.ball.alpha")) {
+        float v = pm_pref_float("pm.ball.alpha", PMBallAlpha);
+        v = MAX(0.2f, MIN(1.0f, v));
+        if (fabsf(v - PMBallAlpha) > 0.005f) { PMBallAlpha = v; ballChanged = YES; }
+    }
+    pm_sync_profile_edits();
     if (!inited) {
         inited = YES;
         PMLog(@"设置已同步 (auto=%d ap=%d hp=%d bar=%d unlock=%d)",
@@ -2061,6 +2289,7 @@ static void pm_runtime_tick(void) {
                 gTriedGsp = NULL;
                 gTriedCount = 0;
                 gModTabObj = NULL;
+                gModTabGO = NULL;
                 gModPageGO = NULL;
             }
             if (gEntryInjected && !pm_panel_has_mod_tab(gSettingsObj)) {
@@ -2071,7 +2300,9 @@ static void pm_runtime_tick(void) {
                 gTriedGsp = NULL;
                 gTriedCount = 0;
                 gModTabObj = NULL;
+                gModTabGO = NULL;
             }
+            if (gEntryInjected) pm_keep_mod_tab_selected(gSettingsObj);
             if (!gSettingsSeenAt) gSettingsSeenAt = now;
             if (!gEntryInjected && now - lastAttempt > 2.0) {
                 lastAttempt = now;
