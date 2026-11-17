@@ -1576,6 +1576,69 @@ static BOOL pm_panel_has_mod_tab(void *gsp) {
     return NO;
 }
 
+// 官方 Tab.Layout 处理第一行时会取 gsp.unboundedMenus[viewPageIndex]，
+// 我们的页索引是新增的，必须把列表补齐，否则 List.get_Item 直接下标越界。
+// 补进去的菜单是「只存在于托管堆的空壳」：不在场景里、Update 不会跑，
+// 只带一个 animator 和我们按钮一致的 item，让官方的 First(...) 能命中。
+static void pm_pad_unbounded_menus(void *gsp, int pageIndex, void *tabGO) {
+    void *um = *(void **)((char *)gsp + 0x28);
+    if (!pm_ptr_ok(um)) {
+        PMLog(@"Mod页: unboundedMenus 不可用 %p", um);
+        return;
+    }
+    int n0 = 0;
+    void **uitems = pm_list_items(um, &n0);
+    void *menu0 = (uitems && n0 > 0 && pm_ptr_ok(uitems[0])) ? uitems[0] : NULL;
+    Il2CppClass *menuCls = NULL, *itemCls = NULL;
+    void *it0 = NULL;
+    if (pm_ptr_ok(menu0)) {
+        menuCls = il2cpp_object_get_class((Il2CppObject *)menu0);
+        void *it0Arr = *(void **)((char *)menu0 + 0x20);
+        if (pm_ptr_ok(it0Arr) && *(int *)((char *)it0Arr + 0x18) > 0) {
+            void *p = *(void **)((char *)it0Arr + 0x20);
+            if (pm_ptr_ok(p)) { it0 = p; itemCls = il2cpp_object_get_class((Il2CppObject *)p); }
+        }
+    }
+    if (!menuCls) menuCls = pm_class_any_ns("UnboundedMenu", NULL);
+    if (!itemCls) itemCls = pm_class_any_ns("MenuItemWithSub", NULL);
+    if (!menuCls || !itemCls) {
+        PMLog(@"Mod页: 找不到 UnboundedMenu 类 menu=%p item=%p", menuCls, itemCls);
+        return;
+    }
+    // 我们按钮上的 Animator（取不到也没关系：官方判定两边都为 null 时同样成立）
+    void *anim = NULL;
+    Il2CppClass *animCls = pm_class_any_ns("Animator", "UnityEngine");
+    if (animCls && tabGO && il2cpp_class_get_type && il2cpp_type_get_object) {
+        void *t = il2cpp_type_get_object(il2cpp_class_get_type(animCls));
+        if (t) {
+            void *a1[1] = {t};
+            anim = pm_call_obj(tabGO, "GetComponent", 1, a1);
+        }
+    }
+    int count = *(int *)((char *)um + 0x18);
+    int guard = 0;
+    while (count <= pageIndex && guard++ < 8) {
+        Il2CppObject *arr = il2cpp_array_new(itemCls, 1);
+        void *dup = il2cpp_object_new(menuCls);
+        void *it = il2cpp_object_new(itemCls);
+        if (!arr || !dup || !it) break;
+        *(void **)((char *)it + 0x10) = anim;
+        if (it0) {
+            *(void **)((char *)it + 0x18) = *(void **)((char *)it0 + 0x18);
+            *(void **)((char *)it + 0x20) = *(void **)((char *)it0 + 0x20);
+        }
+        if (menu0) *(void **)((char *)dup + 0x28) = *(void **)((char *)menu0 + 0x28);
+        ((void **)((char *)arr + 0x20))[0] = it;
+        *(void **)((char *)dup + 0x20) = arr;
+        void *a[1] = {dup};
+        pm_call_obj(um, "Add", 1, a);
+        int nn = *(int *)((char *)um + 0x18);
+        if (nn == count) break;
+        count = nn;
+    }
+    PMLog(@"Mod页: unboundedMenus 补齐 -> %d (需要 > %d)", count, pageIndex);
+}
+
 // 构建「Mod设置」页：克隆一个官方页做模板，再通过官方 Add() 注册 Tab
 static BOOL pm_build_mod_tab(void *gsp) {
     if (!gsp || !gFindTypesHost || !il2cpp_object_new || !il2cpp_array_new) return NO;
@@ -1807,6 +1870,9 @@ static BOOL pm_build_mod_tab(void *gsp) {
         return NO;
     }
 
+    PMLog(@"Mod页: 准备注册 page=%d 行数=%d", pageIndex, pm_tab_cells(tab, NULL));
+    pm_pad_unbounded_menus(gsp, pageIndex, newTabGO);
+
     int32_t pi = pageIndex;
     void *aargs[2] = {&pi, tab};
     Il2CppException *aexc = NULL;
@@ -2007,7 +2073,7 @@ static void pm_runtime_tick(void) {
                 gModTabObj = NULL;
             }
             if (!gSettingsSeenAt) gSettingsSeenAt = now;
-            if (!gEntryInjected && now - lastAttempt > 0.6) {
+            if (!gEntryInjected && now - lastAttempt > 2.0) {
                 lastAttempt = now;
                 gEntryVisible = YES;
                 PMSetModEntryVisible(false);
