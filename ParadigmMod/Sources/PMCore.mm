@@ -477,6 +477,8 @@ static const MethodInfo *(*il2cpp_class_get_methods)(Il2CppClass *, void **);
 static const char *(*il2cpp_method_get_name)(const MethodInfo *);
 static int (*il2cpp_method_get_param_count)(const MethodInfo *);
 static bool (*il2cpp_method_is_generic)(const MethodInfo *);
+static const Il2CppType *(*il2cpp_method_get_param)(const MethodInfo *, uint32_t);
+static Il2CppClass *(*il2cpp_class_from_il2cpp_type)(const Il2CppType *);
 
 static MethodInfo *gSetResultMethod = NULL;
 
@@ -514,6 +516,8 @@ static bool pm_resolve_il2cpp(void) {
     il2cpp_method_get_name = (__typeof__(il2cpp_method_get_name))dlsym(h, "il2cpp_method_get_name");
     il2cpp_method_get_param_count = (__typeof__(il2cpp_method_get_param_count))dlsym(h, "il2cpp_method_get_param_count");
     il2cpp_method_is_generic = (__typeof__(il2cpp_method_is_generic))dlsym(h, "il2cpp_method_is_generic");
+    il2cpp_method_get_param = (__typeof__(il2cpp_method_get_param))dlsym(h, "il2cpp_method_get_param");
+    il2cpp_class_from_il2cpp_type = (__typeof__(il2cpp_class_from_il2cpp_type))dlsym(h, "il2cpp_class_from_il2cpp_type");
 #undef RESOLVE
     PMIl2CppReady = true;
     return true;
@@ -1490,6 +1494,30 @@ static const MethodInfo *pm_method_nongeneric(Il2CppClass *k, const char *name, 
     return NULL;
 }
 
+// 按「名字 + 参数个数 + 参数类型名」精确挑方法：
+// Instantiate 有多个 3 参数重载（Vector3/Quaternion 版 与 Transform/bool 版），
+// 只按个数匹配会选错，导致克隆静默失败。
+static const MethodInfo *pm_method_exact(Il2CppClass *k, const char *name, int argc, const char *const *want) {
+    if (!k || !il2cpp_class_get_methods || !il2cpp_method_get_param) return NULL;
+    void *iter = NULL;
+    const MethodInfo *m = NULL;
+    while ((m = il2cpp_class_get_methods(k, &iter)) != NULL) {
+        const char *n = il2cpp_method_get_name ? il2cpp_method_get_name(m) : NULL;
+        if (!n || strcmp(n, name) != 0) continue;
+        if (il2cpp_method_get_param_count && il2cpp_method_get_param_count(m) != argc) continue;
+        if (il2cpp_method_is_generic && il2cpp_method_is_generic(m)) continue;
+        BOOL ok = YES;
+        for (int i = 0; i < argc && ok; i++) {
+            const Il2CppType *pt = il2cpp_method_get_param(m, (uint32_t)i);
+            Il2CppClass *pc = (pt && il2cpp_class_from_il2cpp_type) ? il2cpp_class_from_il2cpp_type(pt) : NULL;
+            const char *pn = pc ? il2cpp_class_get_name(pc) : NULL;
+            if (!pn || strcmp(pn, want[i]) != 0) ok = NO;
+        }
+        if (ok) return m;
+    }
+    return NULL;
+}
+
 static void *pm_get_child(void *tr, int idx) {
     if (!pm_ptr_ok(tr)) return NULL;
     int32_t i = idx;
@@ -1588,8 +1616,10 @@ static BOOL pm_build_mod_tab(void *gsp) {
     void *tabParent = pm_call_obj(tabProto, "get_parent", 0, NULL);
     void *viewParent = pm_call_obj(viewProto, "get_parent", 0, NULL);
     // 这个 Unity 版本里 2 参数的 Instantiate 只有泛型版（<T>），
-    // 没法用 runtime_invoke 调，所以走 3 参数的非泛型 (Object, Transform, bool)。
-    const MethodInfo *mInst = pm_method_nongeneric(gFindTypesHost, "Instantiate", 3);
+    // 无法用 runtime_invoke 调；3 参数里又有 (Vector3,Quaternion) 版本，
+    // 所以必须按参数类型精确匹配 (Object, Transform, bool)。
+    static const char *kInstParams[3] = {"Object", "Transform", "Boolean"};
+    const MethodInfo *mInst = pm_method_exact(gFindTypesHost, "Instantiate", 3, kInstParams);
     if (!pm_ptr_ok(tabParent) || !pm_ptr_ok(viewParent) || !mInst) {
         PMLog(@"Mod页: 容器异常 tabParent=%p viewParent=%p inst=%p", tabParent, viewParent, mInst);
         return NO;
@@ -1612,6 +1642,11 @@ static BOOL pm_build_mod_tab(void *gsp) {
         il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
         if (ex) { PMLog(@"Mod页: 克隆 Tab 按钮失败 exc=%p", ex); break; }
         tabChildren = pm_child_count(tabParent);
+    }
+    PMLog(@"Mod页: 补按钮后 tabChild=%d (需要 > %d)", tabChildren, nextTab);
+    if (tabChildren <= nextTab) {
+        PMLog(@"Mod页: 侧栏按钮补不齐，放弃本次注入");
+        return NO;
     }
 
     // 页面：优先克隆官方页面原型 viewProto（官方建页就是这么做的，
