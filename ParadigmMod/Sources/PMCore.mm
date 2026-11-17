@@ -2357,6 +2357,81 @@ static void pm_sync_prefs(void) {
     logged = YES;
 }
 
+// ---------------------------------------------------------------------------
+// 商店：把所有商品标成「已购买」并刷新显示（只读改状态，不触发购买流程）
+// ---------------------------------------------------------------------------
+static Il2CppClass *gStoreClass = NULL;
+static void *gStoreObj = NULL, *gStoreHandle = NULL;
+static Il2CppClass *gResultInfoClass = NULL;
+
+static int pm_store_mark(void *mgr, size_t listOff, size_t purchasedOff) {
+    void *lst = *(void **)((char *)mgr + listOff);
+    int n = 0;
+    void **items = pm_list_items(lst, &n);
+    int changed = 0;
+    for (int i = 0; i < n; i++) {
+        void *c = items[i];
+        if (!pm_ptr_ok(c)) continue;
+        if (*(uint8_t *)((char *)c + purchasedOff) == 0) {
+            *(uint8_t *)((char *)c + purchasedOff) = 1;
+            changed++;
+        }
+        pm_call_obj(c, "RefreshPurchasedState", 0, NULL);
+    }
+    return changed;
+}
+
+static void pm_apply_store_unlock(void) {
+    if (!gStoreClass) gStoreClass = pm_find_class("StoreManager");
+    if (!gStoreClass) return;
+    pm_refresh_object(gStoreClass, &gStoreObj, &gStoreHandle);
+    void *mgr = gStoreObj;
+    if (!mgr) return;
+    int changed = 0;
+    changed += pm_store_mark(mgr, 0x58, 0x30);   // 推荐 tab
+    changed += pm_store_mark(mgr, 0x78, 0x48);   // 专辑 tab
+    changed += pm_store_mark(mgr, 0x98, 0x38);   // 单曲 tab
+    changed += pm_store_mark(mgr, 0xB8, 0x80);   // 皮肤 tab
+    if (changed) {
+        pm_call_obj(mgr, "UpdateStateDisplay", 0, NULL);
+        PMLog(@"商店: 标记已购买 %d 个商品", changed);
+    }
+}
+
+// 结算页的玩家信息卡（等级 / Rating）也用自定义值
+static void pm_apply_result_playerinfo(void) {
+    if (!gResultInfoClass) gResultInfoClass = pm_find_class("ResultPlayerInfoController");
+    if (!gResultInfoClass || !gFindTypesHost || !il2cpp_class_get_type || !il2cpp_type_get_object) return;
+    void *typeObj = il2cpp_type_get_object(il2cpp_class_get_type(gResultInfoClass));
+    const MethodInfo *m = il2cpp_class_get_method_from_name(gFindTypesHost, "FindObjectsOfType", 1);
+    if (!typeObj || !m) return;
+    void *args[1] = {typeObj};
+    Il2CppObject *arr = il2cpp_runtime_invoke(m, NULL, args, NULL);
+    if (!arr) return;
+    int n = *(int *)((char *)arr + 0x18);
+    void **items = *(void ***)((char *)arr + 0x20);
+    if (n <= 0 || n > 32 || !items) return;
+    NSString *lv = PMProfileValue(@"level");
+    NSString *rt = PMProfileValue(@"rating");
+    if (!lv.length && !rt.length) return;
+    for (int i = 0; i < n; i++) {
+        void *c = items[i];
+        if (!pm_ptr_ok(c)) continue;
+        if (lv.length) {
+            NSString *s = [lv.lowercaseString hasPrefix:@"lv"] ? lv : [NSString stringWithFormat:@"Lv.%@", lv];
+            pm_set_component_text(*(void **)((char *)c + 0x30), s);
+        }
+        if (rt.length) {
+            pm_set_component_text(*(void **)((char *)c + 0x58), [NSString stringWithFormat:@"%.2f", rt.doubleValue]);
+        }
+        void *info = *(void **)((char *)c + 0x78);
+        if (pm_ptr_ok(info)) {
+            if (lv.length) *(int32_t *)((char *)info + 0x38) = lv.intValue;
+            if (rt.length) *(int32_t *)((char *)info + 0x48) = (int32_t)lround(rt.doubleValue * 100.0);
+        }
+    }
+}
+
 static void pm_runtime_tick(void) {
     if (!PMIl2CppReady) return;
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
@@ -2470,6 +2545,8 @@ static void pm_runtime_tick(void) {
     if (now - gLastSlowTime > 1.5) {
         gLastSlowTime = now;
         pm_apply_static_settings();
+        pm_apply_store_unlock();
+        pm_apply_result_playerinfo();
     }
 
     void *wrap = gWrapObj;
