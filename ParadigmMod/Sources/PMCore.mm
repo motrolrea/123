@@ -875,9 +875,6 @@ static void pm_apply_playerinfo_overrides(void *self) {
             pm_call_obj(self, "UpdateRatingDisplayOnSceneLoad", 0, NULL);
             PMLog(@"评分写入 savedRating=%d (=%.2f)", rating100, rating100 / 100.0);
         }
-        NSString *txt = [NSString stringWithFormat:@"%.2f", rating100 / 100.0];
-        pm_set_component_text(*(void **)((char *)self + kOff_PI_Rating), txt);
-        pm_set_component_text(*(void **)((char *)self + kOff_PI_RatingSmall), txt);
     } else {
         pm_set_text_at(self, kOff_PI_Rating, @"rating");
         pm_set_text_at(self, kOff_PI_RatingSmall, @"rating");
@@ -904,9 +901,6 @@ static void pm_apply_commonuserinfo_overrides(void *self) {
         pm_call_obj(self, "UpdateRatingDisplayOnSceneLoad", 0, NULL);
         PMLog(@"主界面左上角评分已设为 %.2f（图标同步）", r100 / 100.0);
     }
-    NSString *txt = [NSString stringWithFormat:@"%.2f", r100 / 100.0];
-    pm_set_component_text(*(void **)((char *)self + 0x78), txt);
-    pm_set_component_text(*(void **)((char *)self + 0x80), txt);
 }
 
 static void (*orig_CM_RefreshData)(void *) = NULL;
@@ -1726,6 +1720,34 @@ static int gTriedCount = 0;
 static void *gModTabObj = NULL;
 static void *gModTabGO = NULL;   // 侧栏 Mod设置 按钮的 GameObject
 
+static void *pm_tab_animator(void *go) {
+    if (!pm_ptr_ok(go)) return NULL;
+    Il2CppClass *animCls = pm_class_any_ns("Animator", "UnityEngine");
+    if (!animCls || !il2cpp_class_get_type || !il2cpp_type_get_object) return NULL;
+    void *t = il2cpp_type_get_object(il2cpp_class_get_type(animCls));
+    if (!t) return NULL;
+    void *a[1] = {t};
+    return pm_call_obj(go, "GetComponent", 1, a);
+}
+
+static int pm_tab_active(void *go) {
+    void *anim = pm_tab_animator(go);
+    if (!anim) return -1;
+    Il2CppString *k = il2cpp_string_new("TabActive");
+    void *a[1] = {k};
+    void *boxed = pm_call_obj(anim, "GetBool", 1, a);
+    return boxed ? *(uint8_t *)((char *)boxed + 0x10) : -1;
+}
+
+static void pm_set_tab_active(void *go, BOOL on) {
+    void *anim = pm_tab_animator(go);
+    if (!anim) return;
+    Il2CppString *k = il2cpp_string_new("TabActive");
+    uint8_t b = on ? 1 : 0;
+    void *a[2] = {k, &b};
+    pm_call_obj(anim, "SetBool", 2, a);
+}
+
 // 面板可能把某个侧栏按钮留在 EventSystem 的「已选中」状态，这里清一次
 static void pm_clear_event_selection(void) {
     Il2CppClass *es = pm_class_any_ns("EventSystem", "UnityEngine.EventSystems");
@@ -1741,37 +1763,29 @@ static void pm_clear_event_selection(void) {
 }
 
 // 官方点击时只批量关一次 TabActive，面板重建/动画残留会漏；
-// 只要我们的页处于选中态，就把其它侧栏项逐个 SetActive(false)，再把自己点亮
+// 只要我们的页处于选中态，就把其它侧栏项逐个关掉，再把自己点亮
 static void pm_keep_mod_tab_selected(void *gsp) {
     if (!pm_ptr_ok(gsp) || !pm_ptr_ok(gModTabGO)) return;
-    Il2CppClass *animCls = pm_class_any_ns("Animator", "UnityEngine");
-    void *anim = NULL;
-    if (animCls && il2cpp_class_get_type && il2cpp_type_get_object) {
-        void *t = il2cpp_type_get_object(il2cpp_class_get_type(animCls));
-        if (t) {
-            void *a[1] = {t};
-            anim = pm_call_obj(gModTabGO, "GetComponent", 1, a);
-        }
-    }
     BOOL mine = NO;
     if (pm_ptr_ok(gModPageGO)) {
         void *a = pm_call_obj(gModPageGO, "get_activeSelf", 0, NULL);
         if (a && *(uint8_t *)((char *)a + 0x10)) mine = YES;
     }
-    if (!mine && anim) {
-        Il2CppString *key = il2cpp_string_new("TabActive");
-        void *gargs[1] = {key};
-        void *boxed = pm_call_obj(anim, "GetBool", 1, gargs);
-        if (boxed && *(uint8_t *)((char *)boxed + 0x10)) mine = YES;
-    }
     if (!mine) return;
     void *tabs = *(void **)((char *)gsp + 0x40);
     int n = 0;
     void **items = pm_list_items(tabs, &n);
+    for (int i = 0; i < n && items; i++) {
+        if (!pm_ptr_ok(items[i]) || items[i] == gModTabObj) continue;
+        uint8_t f = 0;
+        void *a[1] = {&f};
+        pm_call_obj(items[i], "SetActive", 1, a);
+    }
+    pm_set_tab_active(gModTabGO, YES);
+    pm_clear_event_selection();
     static BOOL logged = NO;
     if (!logged) {
         logged = YES;
-        PMLog(@"Mod页: 选中态兜底 tab=%p anim=%p tabs=%d", gModTabGO, anim, n);
         for (int i = 0; i < n && items; i++) {
             void *t = items[i];
             if (!pm_ptr_ok(t)) continue;
@@ -1779,42 +1793,9 @@ static void pm_keep_mod_tab_selected(void *gsp) {
             void *nm = go ? pm_call_obj(go, "get_name", 0, NULL) : NULL;
             char nb[96] = {0};
             if (nm) pm_il2cpp_string_ascii(nm, nb, sizeof(nb));
-            char ab[96] = {0};
-            int act = -1, tabActive = -1;
-            if (go) {
-                void *aa = pm_call_obj(go, "get_activeSelf", 0, NULL);
-                act = aa ? *(uint8_t *)((char *)aa + 0x10) : -1;
-                if (animCls && il2cpp_class_get_type && il2cpp_type_get_object) {
-                    void *tt = il2cpp_type_get_object(il2cpp_class_get_type(animCls));
-                    if (tt) {
-                        void *ga[1] = {tt};
-                        void *ta = pm_call_obj(go, "GetComponent", 1, ga);
-                        if (ta) {
-                            Il2CppString *kk = il2cpp_string_new("TabActive");
-                            void *ba[1] = {kk};
-                            void *bv = pm_call_obj(ta, "GetBool", 1, ba);
-                            tabActive = bv ? *(uint8_t *)((char *)bv + 0x10) : -1;
-                        }
-                    }
-                }
-            }
-            (void)ab;
-            PMLog(@"Mod页:   tab[%d]=%s GO=%p active=%d tabActive=%d", i, nb, go, act, tabActive);
+            PMLog(@"Mod页: 清理后 tab[%d]=%s tabActive=%d", i, nb, pm_tab_active(go));
         }
     }
-    for (int i = 0; i < n && items; i++) {
-        if (!pm_ptr_ok(items[i]) || items[i] == gModTabObj) continue;
-        uint8_t f = 0;
-        void *a[1] = {&f};
-        pm_call_obj(items[i], "SetActive", 1, a);
-    }
-    if (anim) {
-        Il2CppString *key = il2cpp_string_new("TabActive");
-        uint8_t b = 1;
-        void *sargs[2] = {key, &b};
-        pm_call_obj(anim, "SetBool", 2, sargs);
-    }
-    pm_clear_event_selection();
 }
 
 static BOOL pm_panel_has_mod_tab(void *gsp) {
@@ -2030,8 +2011,10 @@ static BOOL pm_build_mod_tab(void *gsp) {
             PMLog(@"Mod页: 新按钮坐标 %.1f,%.1f,%.1f", np[0], np[1], np[2]);
         }
     }
-    // Tab.Layout 用 GetComponentInChildren 找标题文本和按钮，必须先把按钮激活
+    // Tab.Layout 用 GetComponentInChildren 找标题文本和按钮，必须先把按钮激活；
+    // 克隆自「推荐」按钮会继承它的选中态，这里顺手清掉
     pm_go_set_active(newTabGO, true);
+    pm_set_tab_active(newTabGO, NO);
 
     // 页面：必须克隆一个「已注册的真实页」，因为官方 Tab.Layout 是拿
     // cells 容器里的原型（下标 1=ChoiceCell、6=TitleCell…）来生成行的；
