@@ -842,6 +842,15 @@ static void pm_apply_collection_overrides(void *self) {
     pm_set_text_at_ex(self, kOff_CM_Skin, @"skins", PMUnlockSkins);
 }
 
+// 等级文本：官方主页是「Lv.34」，这里补上前缀
+static void pm_set_level_at(void *self, size_t off) {
+    if (!self) return;
+    NSString *v = PMProfileValue(@"level");
+    if (!v.length) return;
+    NSString *s = [v.lowercaseString hasPrefix:@"lv"] ? v : [NSString stringWithFormat:@"Lv.%@", v];
+    pm_set_component_text(*(void **)((char *)self + off), s);
+}
+
 static void pm_apply_playerinfo_overrides(void *self) {
     if (!self) return;
     static BOOL loggedOnce = NO;
@@ -852,17 +861,23 @@ static void pm_apply_playerinfo_overrides(void *self) {
               PMProfileValue(@"level") ?: @"(空)",
               (unsigned long)PMProfileText.count);
     }
-    pm_set_text_at(self, kOff_PI_Level, @"level");
+    pm_set_level_at(self, kOff_PI_Level);
     NSString *rv = PMProfileValue(@"rating");
     if (rv.length) {
         // 左上角的「8.51」来自 savedRating / 100，评分图标也按同一阈值分级，
         // 所以直接改内部值再调官方刷新，数字和图标才会一起变。
-        int32_t rating100 = (int32_t)lround(rv.doubleValue * 100.0);
+        double r = rv.doubleValue;
+        if (r < 0) r = 0;
+        if (r > 9999.99) r = 9999.99;
+        int32_t rating100 = (int32_t)lround(r * 100.0);
         if (*(int32_t *)((char *)self + kOff_PI_SavedRating) != rating100) {
             *(int32_t *)((char *)self + kOff_PI_SavedRating) = rating100;
             pm_call_obj(self, "UpdateRatingDisplayOnSceneLoad", 0, NULL);
-            PMLog(@"主界面评分已设为 %.2f（图标同步刷新）", rating100 / 100.0);
+            PMLog(@"评分写入 savedRating=%d (=%.2f)", rating100, rating100 / 100.0);
         }
+        NSString *txt = [NSString stringWithFormat:@"%.2f", rating100 / 100.0];
+        pm_set_component_text(*(void **)((char *)self + kOff_PI_Rating), txt);
+        pm_set_component_text(*(void **)((char *)self + kOff_PI_RatingSmall), txt);
     } else {
         pm_set_text_at(self, kOff_PI_Rating, @"rating");
         pm_set_text_at(self, kOff_PI_RatingSmall, @"rating");
@@ -873,19 +888,25 @@ static void pm_apply_playerinfo_overrides(void *self) {
 // 它的评分同样是 savedRating / 100，图标按同一阈值取 sprite。
 static void pm_apply_commonuserinfo_overrides(void *self) {
     if (!self) return;
-    pm_set_text_at(self, 0x28, @"level");          // levelText
+    pm_set_level_at(self, 0x28);                   // levelText
     NSString *rv = PMProfileValue(@"rating");
     if (!rv.length) {
         pm_set_text_at(self, 0x78, @"rating");     // ratingText (TMP)
         pm_set_text_at(self, 0x80, @"rating");     // ratingSmallText (TMP)
         return;
     }
-    int32_t r100 = (int32_t)lround(rv.doubleValue * 100.0);
+    double r = rv.doubleValue;
+    if (r < 0) r = 0;
+    if (r > 9999.99) r = 9999.99;
+    int32_t r100 = (int32_t)lround(r * 100.0);
     if (*(int32_t *)((char *)self + 0xE4) != r100) {
         *(int32_t *)((char *)self + 0xE4) = r100;
         pm_call_obj(self, "UpdateRatingDisplayOnSceneLoad", 0, NULL);
         PMLog(@"主界面左上角评分已设为 %.2f（图标同步）", r100 / 100.0);
     }
+    NSString *txt = [NSString stringWithFormat:@"%.2f", r100 / 100.0];
+    pm_set_component_text(*(void **)((char *)self + 0x78), txt);
+    pm_set_component_text(*(void **)((char *)self + 0x80), txt);
 }
 
 static void (*orig_CM_RefreshData)(void *) = NULL;
@@ -1759,13 +1780,26 @@ static void pm_keep_mod_tab_selected(void *gsp) {
             char nb[96] = {0};
             if (nm) pm_il2cpp_string_ascii(nm, nb, sizeof(nb));
             char ab[96] = {0};
-            int act = -1;
+            int act = -1, tabActive = -1;
             if (go) {
                 void *aa = pm_call_obj(go, "get_activeSelf", 0, NULL);
                 act = aa ? *(uint8_t *)((char *)aa + 0x10) : -1;
+                if (animCls && il2cpp_class_get_type && il2cpp_type_get_object) {
+                    void *tt = il2cpp_type_get_object(il2cpp_class_get_type(animCls));
+                    if (tt) {
+                        void *ga[1] = {tt};
+                        void *ta = pm_call_obj(go, "GetComponent", 1, ga);
+                        if (ta) {
+                            Il2CppString *kk = il2cpp_string_new("TabActive");
+                            void *ba[1] = {kk};
+                            void *bv = pm_call_obj(ta, "GetBool", 1, ba);
+                            tabActive = bv ? *(uint8_t *)((char *)bv + 0x10) : -1;
+                        }
+                    }
+                }
             }
             (void)ab;
-            PMLog(@"Mod页:   tab[%d]=%s GO=%p active=%d", i, nb, go, act);
+            PMLog(@"Mod页:   tab[%d]=%s GO=%p active=%d tabActive=%d", i, nb, go, act, tabActive);
         }
     }
     for (int i = 0; i < n && items; i++) {
@@ -2609,7 +2643,9 @@ static void *pm_block_server_thread(void *arg) {
         if (c < 0) break;
         char buf[2048];
         recv(c, buf, sizeof(buf), 0);
-        const char *body = "{\"code\":0,\"message\":\"ok\",\"data\":{}}";
+        const char *body = "{\"status\":\"ok\",\"code\":\"0\",\"reason\":0,\"message\":\"ok\","
+                           "\"rating\":0,\"result_id\":\"\",\"single_rating\":0,"
+                           "\"is_b15\":false,\"max_rating\":0,\"data\":{}}";
         char resp[512];
         int n = snprintf(resp, sizeof(resp),
                          "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
