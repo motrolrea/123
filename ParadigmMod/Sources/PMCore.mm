@@ -1275,15 +1275,6 @@ static void *pm_new_choice_cell(const char *label, const char *prefKey, int def)
     return exc ? NULL : obj;
 }
 
-static void pm_destroy_go(void *go) {
-    if (!go || !gFindTypesHost) return;
-    const MethodInfo *m = il2cpp_class_get_method_from_name(gFindTypesHost, "Destroy", 1);
-    if (m) {
-        void *a[1] = {go};
-        il2cpp_runtime_invoke(m, NULL, a, NULL);
-    }
-}
-
 // 把页面大标题文本改成「Mod设置」
 static void pm_set_page_title(void *pageGO, void *oldTitle) {
     if (!oldTitle) return;
@@ -1538,49 +1529,33 @@ static void pm_list_remove_last(void *list) {
     pm_call_obj(list, "RemoveAt", 1, a);
 }
 
-static BOOL pm_tr_is_clone(void *tr) {
-    void *go = pm_call_obj(tr, "get_gameObject", 0, NULL);
-    void *nm = go ? pm_call_obj(go, "get_name", 0, NULL) : NULL;
-    if (!nm) return NO;
-    char buf[256];
-    pm_il2cpp_string_ascii(nm, buf, sizeof(buf));
-    size_t len = strlen(buf);
-    return len >= 7 && strcmp(buf + len - 7, "(Clone)") == 0;
+static BOOL pm_name_is_clone(const char *nb) {
+    size_t len = strlen(nb);
+    return len >= 7 && strcmp(nb + len - 7, "(Clone)") == 0;
 }
 
-// 克隆一个官方页后，把页里已经生成的行删掉，只留 cell 原型
-// （Unity 只给克隆出来的那一层加 (Clone)，Viewport/Scrollbar 等结构不会被动到）
-static void pm_clear_cloned_rows(void *pageGO, void *pageTr) {
-    Il2CppClass *trCls = pm_class_any_ns("Transform", "UnityEngine");
-    if (!trCls || !il2cpp_class_get_type || !il2cpp_type_get_object) return;
-    void *typeObj = il2cpp_type_get_object(il2cpp_class_get_type(trCls));
-    if (!typeObj || !pageGO) return;
-    Il2CppClass *goCls = il2cpp_object_get_class((Il2CppObject *)pageGO);
-    if (!goCls) return;
-    const MethodInfo *m = pm_method_nongeneric(goCls, "GetComponentsInChildren", 2);
-    uint8_t inc = 1;
-    void *args[2] = {typeObj, &inc};
-    Il2CppObject *trs = m ? (Il2CppObject *)il2cpp_runtime_invoke(m, pageGO, args, NULL) : NULL;
-    if (!trs) {
-        void *a1[1] = {typeObj};
-        trs = (Il2CppObject *)pm_call_obj(pageGO, "GetComponentsInChildren", 1, a1);
-    }
-    if (!trs) return;
-    int n = *(int *)((char *)trs + 0x18);
-    void **items = *(void ***)((char *)trs + 0x20);
-    if (n <= 0 || n > 20000 || !items) return;
-    int removed = 0;
+// 克隆一个官方页后，把页里已经生成的行「隐藏」掉（不要 Destroy：
+// 销毁后组件数组里还留着野指针，继续访问会直接把进程打崩）
+static int pm_hide_cloned_rows(void *tr, int depth) {
+    if (!pm_ptr_ok(tr) || depth > 8) return 0;
+    int n = pm_child_count(tr);
+    if (n <= 0 || n > 500) return 0;
+    int hidden = 0;
     for (int i = 0; i < n; i++) {
-        void *tr = items[i];
-        if (!tr || tr == pageTr) continue;
-        if (!pm_tr_is_clone(tr)) continue;
-        void *parent = pm_call_obj(tr, "get_parent", 0, NULL);
-        if (parent && pm_tr_is_clone(parent)) continue;   // 父级也是克隆，随父一起销毁
-        void *go = pm_call_obj(tr, "get_gameObject", 0, NULL);
-        pm_destroy_go(go);
-        removed++;
+        void *c = pm_get_child(tr, i);
+        if (!pm_ptr_ok(c)) continue;
+        void *go = pm_call_obj(c, "get_gameObject", 0, NULL);
+        void *nm = go ? pm_call_obj(go, "get_name", 0, NULL) : NULL;
+        char nb[192] = {0};
+        if (nm) pm_il2cpp_string_ascii(nm, nb, sizeof(nb));
+        if (pm_name_is_clone(nb)) {
+            pm_go_set_active(go, false);
+            hidden++;
+            continue;   // 整行隐藏即可，不用再往下走
+        }
+        hidden += pm_hide_cloned_rows(c, depth + 1);
     }
-    PMLog(@"Mod页: 清掉模板页旧行 %d 个", removed);
+    return hidden;
 }
 
 // 官方设置面板上的 Mod 注册状态（按实例记录，便于面板重建后重新注入）
@@ -1718,7 +1693,8 @@ static BOOL pm_build_mod_tab(void *gsp) {
         PMLog(@"Mod页: 侧栏按钮补不齐，放弃本次注入");
         return NO;
     }
-    void *newTabGO = pm_get_child(tabParent, needTabIdx);
+    void *newTabTr = pm_get_child(tabParent, needTabIdx);
+    void *newTabGO = newTabTr ? pm_call_obj(newTabTr, "get_gameObject", 0, NULL) : NULL;
     // 预制体克隆会保留原按钮的坐标，导致新按钮叠在第一个按钮上，这里按间距移位
     if (tabChildren >= 3) {
         void *a1 = pm_get_child(tabParent, tabChildren - 3);
@@ -1742,12 +1718,15 @@ static BOOL pm_build_mod_tab(void *gsp) {
     void *clonedPage = NULL;
     if (pm_ptr_ok(srcView)) {
         void *srcGO = pm_call_obj(srcView, "get_gameObject", 0, NULL);
+        PMLog(@"Mod页: 开始克隆模板页 src=%p go=%p", srcView, srcGO);
         void *ia[3] = {srcGO, viewParent, &gInstInWorld};
         Il2CppException *ex = NULL;
         clonedPage = il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
         if (ex || !clonedPage) {
             pm_log_exc("Mod页: 克隆模板页", ex);
             clonedPage = NULL;
+        } else {
+            PMLog(@"Mod页: 克隆模板页完成 page=%p", clonedPage);
         }
     }
     if (!clonedPage) {
@@ -1760,7 +1739,8 @@ static BOOL pm_build_mod_tab(void *gsp) {
         PMLog(@"Mod页: 取新页失败 page=%p", page);
         return NO;
     }
-    pm_clear_cloned_rows((void *)page, pageTr);
+    int hiddenRows = pm_hide_cloned_rows(pageTr, 0);
+    PMLog(@"Mod页: 隐藏模板页旧行 %d 个", hiddenRows);
     pm_go_set_active((void *)page, true);
     void *pargs[1] = {pageTr};
     pm_call_obj(pages, "Add", 1, pargs);
@@ -1785,9 +1765,8 @@ static BOOL pm_build_mod_tab(void *gsp) {
     if (!tab || !mTabCtor || !tabTitle) {
         PMLog(@"Mod页: Tab 创建失败 tab=%p ctor=%p", tab, mTabCtor);
         pm_list_remove_last(pages);
-        pm_destroy_go((void *)page);
+        pm_go_set_active((void *)page, false);
         pm_go_set_active(newTabGO, false);
-        pm_destroy_go(newTabGO);
         return NO;
     }
     void *targs[1] = {tabTitle};
@@ -1823,9 +1802,8 @@ static BOOL pm_build_mod_tab(void *gsp) {
     if (made == 0) {
         PMLog(@"Mod页: 设置项创建失败");
         pm_list_remove_last(pages);
-        pm_destroy_go((void *)page);
+        pm_go_set_active((void *)page, false);
         pm_go_set_active(newTabGO, false);
-        pm_destroy_go(newTabGO);
         return NO;
     }
 
@@ -1841,9 +1819,8 @@ static BOOL pm_build_mod_tab(void *gsp) {
         // 不回滚会让下一次重试的索引全部错位
         pm_list_remove_last(tabs);
         pm_list_remove_last(pages);
-        pm_destroy_go((void *)page);
+        pm_go_set_active((void *)page, false);
         pm_go_set_active(newTabGO, false);
-        pm_destroy_go(newTabGO);
         PMLog(@"Mod页: 官方 Add 失败，已回滚本次注入");
         return NO;
     }
