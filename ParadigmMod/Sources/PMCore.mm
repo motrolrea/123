@@ -35,6 +35,11 @@
 #include <ucontext.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <ctype.h>
 
 // ---------------------------------------------------------------------------
 // 全局状态（悬浮球 / 设置页修改）
@@ -1380,6 +1385,35 @@ static int pm_tab_cells(void *tab, void ***outItems) {
     return cn;
 }
 
+static BOOL gNumIntFmtPlain = NO, gNumFloatFmtPlain = NO;
+
+// 试调用 formatter(42)，只由数字/小数点组成的才拿来显示（避免出现「1 UNIT」）
+static BOOL pm_fmt_plain(void *del, BOOL isFloat) {
+    if (!pm_ptr_ok(del)) return NO;
+    Il2CppClass *k = il2cpp_object_get_class((Il2CppObject *)del);
+    if (!k) return NO;
+    const MethodInfo *m = il2cpp_class_get_method_from_name(k, "Invoke", 1);
+    if (!m) return NO;
+    void *out = NULL;
+    if (isFloat) {
+        float v = 42.5f;
+        void *a[1] = {&v};
+        out = il2cpp_runtime_invoke(m, del, a, NULL);
+    } else {
+        int32_t v = 42;
+        void *a[1] = {&v};
+        out = il2cpp_runtime_invoke(m, del, a, NULL);
+    }
+    if (!out) return NO;
+    char buf[64] = {0};
+    pm_il2cpp_string_ascii(out, buf, sizeof(buf));
+    if (!buf[0]) return NO;
+    for (const char *p = buf; *p; p++) {
+        if (!isdigit((unsigned char)*p) && *p != '.' && *p != '-' && *p != ' ') return NO;
+    }
+    return YES;
+}
+
 static void pm_scan_cell_classes(void *tabs, int tn, void **titems) {
     int bad = 0;
     for (int i = 0; i < tn; i++) {
@@ -1399,15 +1433,25 @@ static void pm_scan_cell_classes(void *tabs, int tn, void **titems) {
             if (!name) continue;
             if (!gTitleCellClass && strcmp(name, "TitleCell") == 0) gTitleCellClass = k;
             if (!gChoiceCellClass && strncmp(name, "ChoiceCell", 10) == 0) gChoiceCellClass = k;
-            if (!gNumIntClass && strcmp(name, "NumericCellInt") == 0) {
+            if (strcmp(name, "NumericCellInt") == 0) {
                 void *fmt = *(void **)((char *)cell + 0x68);
-                if (pm_ptr_ok(fmt)) { gNumIntClass = k; gNumIntFmt = fmt; }
+                if (pm_ptr_ok(fmt)) {
+                    BOOL plain = pm_fmt_plain(fmt, NO);
+                    if (!gNumIntClass || (plain && !gNumIntFmtPlain)) {
+                        gNumIntClass = k; gNumIntFmt = fmt; gNumIntFmtPlain = plain;
+                    }
+                }
             }
-            if (!gNumFloatClass && strcmp(name, "NumericCellFloat") == 0) {
+            if (strcmp(name, "NumericCellFloat") == 0) {
                 void *fmt = *(void **)((char *)cell + 0x60);
-                if (pm_ptr_ok(fmt)) { gNumFloatClass = k; gNumFloatFmt = fmt; }
+                if (pm_ptr_ok(fmt)) {
+                    BOOL plain = pm_fmt_plain(fmt, YES);
+                    if (!gNumFloatClass || (plain && !gNumFloatFmtPlain)) {
+                        gNumFloatClass = k; gNumFloatFmt = fmt; gNumFloatFmtPlain = plain;
+                    }
+                }
             }
-            if (gTitleCellClass && gChoiceCellClass && gNumIntClass && gNumFloatClass) return;
+            if (gTitleCellClass && gChoiceCellClass && gNumIntFmtPlain && gNumFloatFmtPlain) return;
         }
     }
 }
@@ -1661,6 +1705,20 @@ static int gTriedCount = 0;
 static void *gModTabObj = NULL;
 static void *gModTabGO = NULL;   // 侧栏 Mod设置 按钮的 GameObject
 
+// 面板可能把某个侧栏按钮留在 EventSystem 的「已选中」状态，这里清一次
+static void pm_clear_event_selection(void) {
+    Il2CppClass *es = pm_class_any_ns("EventSystem", "UnityEngine.EventSystems");
+    if (!es) return;
+    const MethodInfo *mc = il2cpp_class_get_method_from_name(es, "get_current", 0);
+    if (!mc) return;
+    Il2CppObject *cur = il2cpp_runtime_invoke(mc, NULL, NULL, NULL);
+    if (!cur) return;
+    const MethodInfo *ms = il2cpp_class_get_method_from_name(es, "SetSelectedGameObject", 1);
+    if (!ms) return;
+    void *a[1] = {NULL};
+    il2cpp_runtime_invoke(ms, cur, a, NULL);
+}
+
 // 官方点击时只批量关一次 TabActive，面板重建/动画残留会漏；
 // 只要我们的页处于选中态，就把其它侧栏项逐个 SetActive(false)，再把自己点亮
 static void pm_keep_mod_tab_selected(void *gsp) {
@@ -1693,6 +1751,22 @@ static void pm_keep_mod_tab_selected(void *gsp) {
     if (!logged) {
         logged = YES;
         PMLog(@"Mod页: 选中态兜底 tab=%p anim=%p tabs=%d", gModTabGO, anim, n);
+        for (int i = 0; i < n && items; i++) {
+            void *t = items[i];
+            if (!pm_ptr_ok(t)) continue;
+            void *go = *(void **)((char *)t + 0x10);
+            void *nm = go ? pm_call_obj(go, "get_name", 0, NULL) : NULL;
+            char nb[96] = {0};
+            if (nm) pm_il2cpp_string_ascii(nm, nb, sizeof(nb));
+            char ab[96] = {0};
+            int act = -1;
+            if (go) {
+                void *aa = pm_call_obj(go, "get_activeSelf", 0, NULL);
+                act = aa ? *(uint8_t *)((char *)aa + 0x10) : -1;
+            }
+            (void)ab;
+            PMLog(@"Mod页:   tab[%d]=%s GO=%p active=%d", i, nb, go, act);
+        }
     }
     for (int i = 0; i < n && items; i++) {
         if (!pm_ptr_ok(items[i]) || items[i] == gModTabObj) continue;
@@ -1706,6 +1780,7 @@ static void pm_keep_mod_tab_selected(void *gsp) {
         void *sargs[2] = {key, &b};
         pm_call_obj(anim, "SetBool", 2, sargs);
     }
+    pm_clear_event_selection();
 }
 
 static BOOL pm_panel_has_mod_tab(void *gsp) {
@@ -1832,9 +1907,12 @@ static BOOL pm_build_mod_tab(void *gsp) {
         PMLog(@"Mod页: 找不到官方 Tab 类");
         return NO;
     }
-    if (!gTitleCellClass || !gChoiceCellClass || !gNumIntClass || !gNumFloatClass) {
+    if (!gTitleCellClass || !gChoiceCellClass || !gNumIntClass || !gNumFloatClass ||
+        !gNumIntFmtPlain || !gNumFloatFmtPlain) {
         pm_scan_cell_classes(tabs, tn, titems);
     }
+    PMLog(@"Mod页: 数值控件 int=%s(%d) float=%s(%d)", gNumIntClass ? "有" : "无", gNumIntFmtPlain,
+          gNumFloatClass ? "有" : "无", gNumFloatFmtPlain);
     if (gTriedCount == 1) pm_raise_hit_volume_cap(tabs, tn, titems);
     if (!gChoiceCellClass) {
         PMLog(@"Mod页: 找不到官方 ChoiceCell 类");
@@ -2011,35 +2089,38 @@ static BOOL pm_build_mod_tab(void *gsp) {
         if (cell) { pm_tab_add_cell(tab, cell); made++; }
     }
 
-    // 资料 / 悬浮球外观：官方设置里没有文本输入控件，这里做成「修改」行，
-    // 点一下由 mod 弹出系统输入框，值直接写进真实存储（不再借用官方 formatter）
-    if (srcHasTitle && gTitleCellClass) pm_tab_add_cell(tab, pm_new_title_cell("资料"));
-    struct { const char *label; const char *key; } acts[] = {
-        {"等级（1-999）",        "level"},
-        {"Rating（0-9999）",     "rating"},
-        {"游玩次数（0-999999）",  "playcount"},
-        {"总游玩时间（小时）",     "playtime"},
-        {"总分数（0-999999999）", "totalscore"},
-    };
+    // 资料 / 悬浮球外观：官方 NumericCellFloat（滑条 + 加减按钮）
     int numMade = 0;
-    for (int i = 0; i < 5; i++) {
-        char pk[64];
-        snprintf(pk, sizeof(pk), "pm.action.%s", acts[i].key);
-        void *c = pm_new_choice_cell2(acts[i].label, pk, 0, "—", "修改");
-        if (c) { pm_tab_add_cell(tab, c); numMade++; }
+    if (gNumFloatClass && gNumFloatFmt) {
+        if (srcHasTitle && gTitleCellClass) pm_tab_add_cell(tab, pm_new_title_cell("资料"));
+        struct { const char *label; const char *key; float lo, hi, step, def; } frows[] = {
+            {"等级（1-999）",        "pm.profile.level",      1, 999,        1,    100},
+            {"Rating（0-9999）",     "pm.profile.rating",     0, 9999,       0.5f, 900},
+            {"游玩次数（0-999999）",  "pm.profile.playcount",  0, 999999,     1,    1000},
+            {"总游玩时间（小时）",     "pm.profile.playtime",   0, 9999,       1,    100},
+            {"总分数（0-999999999）", "pm.profile.totalscore", 0, 999999999,  100,  100000},
+        };
+        for (int i = 0; i < 5; i++) {
+            void *c = pm_new_numeric_float_cell(frows[i].label, frows[i].key,
+                                                frows[i].lo, frows[i].hi,
+                                                frows[i].step, frows[i].def);
+            if (c) { pm_tab_add_cell(tab, c); numMade++; }
+            else PMLog(@"Mod页: 浮点行创建失败 %s", frows[i].key);
+        }
+        if (srcHasTitle && gTitleCellClass) pm_tab_add_cell(tab, pm_new_title_cell("悬浮球外观"));
+        struct { const char *label; const char *key; float lo, hi, step, def; } brows[] = {
+            {"悬浮球大小（24-96）",   "pm.ball.size",  24.0f, 96.0f, 1.0f,  56.0f},
+            {"悬浮球透明度（0.2-1）", "pm.ball.alpha", 0.2f,  1.0f,  0.05f, 0.85f},
+        };
+        for (int i = 0; i < 2; i++) {
+            void *c = pm_new_numeric_float_cell(brows[i].label, brows[i].key,
+                                                brows[i].lo, brows[i].hi,
+                                                brows[i].step, brows[i].def);
+            if (c) { pm_tab_add_cell(tab, c); numMade++; }
+            else PMLog(@"Mod页: 浮点行创建失败 %s", brows[i].key);
+        }
     }
-    if (srcHasTitle && gTitleCellClass) pm_tab_add_cell(tab, pm_new_title_cell("悬浮球外观"));
-    struct { const char *label; const char *key; } bacts[] = {
-        {"悬浮球大小（24-96）",   "ballsize"},
-        {"悬浮球透明度（0.2-1）", "ballalpha"},
-    };
-    for (int i = 0; i < 2; i++) {
-        char pk[64];
-        snprintf(pk, sizeof(pk), "pm.action.%s", bacts[i].key);
-        void *c = pm_new_choice_cell2(bacts[i].label, pk, 0, "—", "修改");
-        if (c) { pm_tab_add_cell(tab, c); numMade++; }
-    }
-    PMLog(@"Mod页: 修改行 %d 个", numMade);
+    PMLog(@"Mod页: 数值行 %d 个", numMade);
     if (made == 0) {
         PMLog(@"Mod页: 设置项创建失败");
         pm_list_remove_last(pages);
@@ -2176,19 +2257,19 @@ static void pm_sync_profile_edits(void) {
     if (!pm_pref_has_key("pm.profile.level") && !pm_pref_has_key("pm.profile.rating")) return;
     static BOOL logged = NO;
     if (pm_pref_has_key("pm.profile.level")) {
-        pm_set_profile_value(@"level", [NSString stringWithFormat:@"%d", pm_pref_int("pm.profile.level", 1)]);
+        pm_set_profile_value(@"level", [NSString stringWithFormat:@"%.0f", pm_pref_float("pm.profile.level", 1.0f)]);
     }
     if (pm_pref_has_key("pm.profile.rating")) {
         pm_set_profile_value(@"rating", [NSString stringWithFormat:@"%.2f", pm_pref_float("pm.profile.rating", 900.0f)]);
     }
     if (pm_pref_has_key("pm.profile.playcount")) {
-        pm_set_profile_value(@"playcount", [NSString stringWithFormat:@"%d", pm_pref_int("pm.profile.playcount", 0)]);
+        pm_set_profile_value(@"playcount", [NSString stringWithFormat:@"%.0f", pm_pref_float("pm.profile.playcount", 0.0f)]);
     }
     if (pm_pref_has_key("pm.profile.playtime")) {
         pm_set_profile_value(@"playtime", [NSString stringWithFormat:@"%.0f", pm_pref_float("pm.profile.playtime", 0.0f)]);
     }
     if (pm_pref_has_key("pm.profile.totalscore")) {
-        pm_set_profile_value(@"totalscore", [NSString stringWithFormat:@"%d", pm_pref_int("pm.profile.totalscore", 0)]);
+        pm_set_profile_value(@"totalscore", [NSString stringWithFormat:@"%.0f", pm_pref_float("pm.profile.totalscore", 0.0f)]);
     }
     if (!logged) {
         logged = YES;
@@ -2490,7 +2571,7 @@ static NSURLRequest *pm_filter_upload(NSURLRequest *req) {
             PMLog(@"已拦截成绩上传请求: %@", u);
         }
         NSMutableURLRequest *m = [req mutableCopy];
-        m.URL = [NSURL URLWithString:@"http://127.0.0.1:1/__pm_blocked__"];
+        m.URL = [NSURL URLWithString:@"http://127.0.0.1:18080/__pm_blocked__"];
         return m;
     }
     return req;
@@ -2503,6 +2584,51 @@ static id pm_dt_req(id self, SEL _cmd, NSURLRequest *req) {
 static id pm_dt_req_cb(id self, SEL _cmd, NSURLRequest *req,
                        void (^cb)(NSData *, NSURLResponse *, NSError *)) {
     return orig_dt_req_cb(self, _cmd, pm_filter_upload(req), cb);
+}
+
+// 本地假上传服务：把拦截到的上传请求返回 200 + 成功 JSON，
+// 这样游戏认为上传成功，不会一直弹「重新上传」
+static void *pm_block_server_thread(void *arg) {
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (lfd < 0) return NULL;
+    int one = 1;
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons(18080);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(lfd, (struct sockaddr *)&a, sizeof(a)) < 0 || listen(lfd, 8) < 0) {
+        close(lfd);
+        PMLog(@"假上传服务启动失败");
+        return NULL;
+    }
+    PMLog(@"假上传服务已启动 127.0.0.1:18080");
+    for (;;) {
+        int c = accept(lfd, NULL, NULL);
+        if (c < 0) break;
+        char buf[2048];
+        recv(c, buf, sizeof(buf), 0);
+        const char *body = "{\"code\":0,\"message\":\"ok\",\"data\":{}}";
+        char resp[512];
+        int n = snprintf(resp, sizeof(resp),
+                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                         "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                         strlen(body), body);
+        send(c, resp, (size_t)n, 0);
+        close(c);
+    }
+    return NULL;
+}
+
+static void pm_start_block_server(void) {
+    static BOOL started = NO;
+    if (started) return;
+    started = YES;
+    pthread_t th;
+    if (pthread_create(&th, NULL, pm_block_server_thread, NULL) == 0) {
+        pthread_detach(th);
+    }
 }
 
 static void pm_install_upload_block(void) {
@@ -2521,6 +2647,7 @@ static void pm_install_upload_block(void) {
         method_setImplementation(m2, (IMP)pm_dt_req_cb);
     }
     PMLog(@"上传拦截已安装: %d/%d", m1 != NULL, m2 != NULL);
+    pm_start_block_server();
 }
 
 void PMStartRuntimeFeatures(void) {
