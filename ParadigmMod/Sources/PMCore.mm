@@ -1275,45 +1275,12 @@ static void *pm_new_choice_cell(const char *label, const char *prefKey, int def)
     return exc ? NULL : obj;
 }
 
-static BOOL pm_tr_is_clone(void *tr) {
-    void *go = pm_call_obj(tr, "get_gameObject", 0, NULL);
-    void *nm = go ? pm_call_obj(go, "get_name", 0, NULL) : NULL;
-    if (!nm) return NO;
-    char buf[256];
-    pm_il2cpp_string_ascii(nm, buf, sizeof(buf));
-    size_t len = strlen(buf);
-    return len >= 7 && strcmp(buf + len - 7, "(Clone)") == 0;
-}
-
 static void pm_destroy_go(void *go) {
     if (!go || !gFindTypesHost) return;
     const MethodInfo *m = il2cpp_class_get_method_from_name(gFindTypesHost, "Destroy", 1);
     if (m) {
         void *a[1] = {go};
         il2cpp_runtime_invoke(m, NULL, a, NULL);
-    }
-}
-
-// 清掉克隆页里已经生成的行（Unity 克隆名以 (Clone) 结尾）
-static void pm_clear_cloned_rows(void *pageGO, void *pageTr) {
-    Il2CppClass *trCls = pm_class_any_ns("Transform", "UnityEngine");
-    if (!trCls || !il2cpp_class_get_type || !il2cpp_type_get_object) return;
-    void *typeObj = il2cpp_type_get_object(il2cpp_class_get_type(trCls));
-    if (!typeObj) return;
-    void *args[1] = {typeObj};
-    Il2CppObject *trs = (Il2CppObject *)pm_call_obj(pageGO, "GetComponentsInChildren", 1, args);
-    if (!trs) return;
-    int n = *(int *)((char *)trs + 0x18);
-    void **items = *(void ***)((char *)trs + 0x20);
-    if (n <= 0 || n > 20000 || !items) return;
-    for (int i = 0; i < n; i++) {
-        void *tr = items[i];
-        if (!tr || tr == pageTr) continue;
-        if (!pm_tr_is_clone(tr)) continue;
-        void *parent = pm_call_obj(tr, "get_parent", 0, NULL);
-        if (parent && pm_tr_is_clone(parent)) continue;   // 父级也是克隆，随父一起销毁
-        void *go = pm_call_obj(tr, "get_gameObject", 0, NULL);
-        pm_destroy_go(go);
     }
 }
 
@@ -1532,6 +1499,45 @@ static void pm_go_set_active(void *go, bool active) {
     pm_call_obj(go, "SetActive", 1, a);
 }
 
+static void pm_log_exc(const char *tag, void *exc) {
+    if (!exc) return;
+    char msg[512] = {0};
+    void *m = pm_call_obj(exc, "get_Message", 0, NULL);
+    if (m) pm_il2cpp_string_ascii(m, msg, sizeof(msg));
+    PMLog(@"%s: 托管异常 %s: %s", tag, pm_obj_class_name(exc), msg);
+}
+
+// 侧栏新按钮位置：预制体克隆会叠在第一个按钮上，这里按官方最后两个按钮的间距推算
+static BOOL pm_get_local_pos(void *tr, float out[3]) {
+    if (!pm_ptr_ok(tr)) return NO;
+    void *v = pm_call_obj(tr, "get_localPosition", 0, NULL);
+    if (!v) return NO;
+    out[0] = *(float *)((char *)v + 0x10);
+    out[1] = *(float *)((char *)v + 0x14);
+    out[2] = *(float *)((char *)v + 0x18);
+    return YES;
+}
+
+static void pm_set_local_pos(void *tr, float v[3]) {
+    if (!pm_ptr_ok(tr) || !il2cpp_object_get_class) return;
+    Il2CppClass *k = il2cpp_object_get_class((Il2CppObject *)tr);
+    const MethodInfo *m = k ? il2cpp_class_get_method_from_name(k, "set_localPosition", 1) : NULL;
+    if (!m) return;
+    void *a[1] = {v};
+    Il2CppException *ex = NULL;
+    il2cpp_runtime_invoke(m, tr, a, &ex);
+    if (ex) pm_log_exc("Mod页: 设置按钮位置", ex);
+}
+
+static void pm_list_remove_last(void *list) {
+    if (!pm_ptr_ok(list)) return;
+    int n = *(int *)((char *)list + 0x18);
+    if (n <= 0) return;
+    int32_t i = n - 1;
+    void *a[1] = {&i};
+    pm_call_obj(list, "RemoveAt", 1, a);
+}
+
 // 构建「Mod设置」页：克隆一个官方页做模板，再通过官方 Add() 注册 Tab
 static BOOL pm_build_mod_tab(void *gsp) {
     static void *patchedGsp = NULL;
@@ -1627,30 +1633,48 @@ static BOOL pm_build_mod_tab(void *gsp) {
     static bool gInstInWorld = false;
 
     int32_t nextTab = *(int32_t *)((char *)gsp + 0x20);
+    // 官方 Add() 是用 tabs.Count 去 tabProto.parent 取侧栏按钮，不是用 nextTabIndex
+    int needTabIdx = tn;
     int tabChildren = pm_child_count(tabParent);
     int viewChildren = pm_child_count(viewParent);
     int pn = *(int *)((char *)pages + 0x18);
-    PMLog(@"Mod页: nextTab=%d tabChild=%d viewChild=%d viewPages=%d", nextTab, tabChildren, viewChildren, pn);
+    PMLog(@"Mod页: nextTab=%d needIdx=%d tabChild=%d viewChild=%d viewPages=%d",
+          nextTab, needTabIdx, tabChildren, viewChildren, pn);
 
-    // 官方 Add() 是从 tabProto 的父节点按 nextTabIndex 取子物体当按钮，
-    // 不够就先克隆一个占位，否则 Add 会取到空指针。
     int guard = 0;
-    while (tabChildren <= nextTab && guard++ < 8) {
+    while (tabChildren <= needTabIdx && guard++ < 8) {
         void *protoGO = pm_call_obj(tabProto, "get_gameObject", 0, NULL);
         void *ia[3] = {protoGO, tabParent, &gInstInWorld};
         Il2CppException *ex = NULL;
         il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
-        if (ex) { PMLog(@"Mod页: 克隆 Tab 按钮失败 exc=%p", ex); break; }
+        if (ex) { pm_log_exc("Mod页: 克隆 Tab 按钮", ex); break; }
         tabChildren = pm_child_count(tabParent);
     }
-    PMLog(@"Mod页: 补按钮后 tabChild=%d (需要 > %d)", tabChildren, nextTab);
-    if (tabChildren <= nextTab) {
+    PMLog(@"Mod页: 补按钮后 tabChild=%d (需要 > %d)", tabChildren, needTabIdx);
+    if (tabChildren <= needTabIdx) {
         PMLog(@"Mod页: 侧栏按钮补不齐，放弃本次注入");
         return NO;
     }
+    void *newTabGO = pm_get_child(tabParent, needTabIdx);
+    // 预制体克隆会保留原按钮的坐标，导致新按钮叠在第一个按钮上，这里按间距移位
+    if (tabChildren >= 3) {
+        void *a1 = pm_get_child(tabParent, tabChildren - 3);
+        void *a2 = pm_get_child(tabParent, tabChildren - 2);
+        float p1[3], p2[3], np[3];
+        if (pm_get_local_pos(a1, p1) && pm_get_local_pos(a2, p2)) {
+            np[0] = p2[0] * 2 - p1[0];
+            np[1] = p2[1] * 2 - p1[1];
+            np[2] = p2[2] * 2 - p1[2];
+            pm_set_local_pos(pm_get_child(tabParent, tabChildren - 1), np);
+            PMLog(@"Mod页: 新按钮坐标 %.1f,%.1f,%.1f", np[0], np[1], np[2]);
+        }
+    }
+    // Tab.Layout 用 GetComponentInChildren 找标题文本和按钮，必须先把按钮激活
+    pm_go_set_active(newTabGO, true);
 
-    // 页面：优先克隆官方页面原型 viewProto（官方建页就是这么做的，
-    // 里面只有 cell 原型、没有已生成的实例行），失败再退回克隆一个已注册页。
+    // 页面：克隆官方页面原型 viewProto（官方建页就是这么做的，
+    // 里面只有 cell 原型、没有已生成的实例行）。注意不要清子物体，
+    // 克隆出来的整个层级名字都带 (Clone)，清一遍会把 cell 容器一起删掉。
     void *clonedPage = NULL;
     if (pm_ptr_ok(viewProto)) {
         void *protoGO = pm_call_obj(viewProto, "get_gameObject", 0, NULL);
@@ -1658,38 +1682,36 @@ static BOOL pm_build_mod_tab(void *gsp) {
         Il2CppException *ex = NULL;
         clonedPage = il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
         if (ex || !clonedPage) {
-            PMLog(@"Mod页: 克隆页面原型失败 exc=%p", ex);
+            pm_log_exc("Mod页: 克隆页面原型", ex);
             clonedPage = NULL;
         }
     }
     if (!clonedPage) {
-        int pn2 = 0;
-        void **pv = pm_list_items(pages, &pn2);
-        void *srcPageTr = (pv && pn2 > 0) ? pv[0] : NULL;
-        void *srcPageGO = srcPageTr ? pm_call_obj(srcPageTr, "get_gameObject", 0, NULL) : NULL;
-        if (pm_ptr_ok(srcPageGO)) {
-            void *ia[3] = {srcPageGO, viewParent, &gInstInWorld};
-            Il2CppException *ex = NULL;
-            clonedPage = il2cpp_runtime_invoke(mInst, NULL, ia, &ex);
-            if (ex || !clonedPage) {
-                PMLog(@"Mod页: 克隆官方页失败 exc=%p", ex);
-                clonedPage = NULL;
-            }
-        }
+        PMLog(@"Mod页: 页面原型不可用 viewProto=%p", viewProto);
+        return NO;
     }
-    if (!clonedPage) return NO;
     void *pageTr = pm_call_obj(clonedPage, "get_transform", 0, NULL);
     void *page = clonedPage;
     if (!pm_ptr_ok(pageTr)) {
         PMLog(@"Mod页: 取新页失败 page=%p", page);
         return NO;
     }
+    pm_go_set_active((void *)page, true);
     void *pargs[1] = {pageTr};
     pm_call_obj(pages, "Add", 1, pargs);
     int pageIndex = *(int *)((char *)pages + 0x18) - 1;
 
-    pm_clear_cloned_rows((void *)page, pageTr);
     pm_set_page_title((void *)page, *(void **)((char *)srcTab + 0x20));
+    int pc = pm_child_count(pageTr);
+    PMLog(@"Mod页: 新页子物体=%d", pc);
+    for (int i = 0; i < pc && i < 8; i++) {
+        void *c = pm_get_child(pageTr, i);
+        void *g = c ? pm_call_obj(c, "get_gameObject", 0, NULL) : NULL;
+        void *nm = g ? pm_call_obj(g, "get_name", 0, NULL) : NULL;
+        char nb[96] = {0};
+        if (nm) pm_il2cpp_string_ascii(nm, nb, sizeof(nb));
+        PMLog(@"Mod页:   页子[%d]=%s 子数=%d", i, nb, pm_child_count(c));
+    }
 
     // 建 Tab 并加入官方设置项
     void *tab = il2cpp_object_new(gTabClass);
@@ -1697,6 +1719,9 @@ static BOOL pm_build_mod_tab(void *gsp) {
     Il2CppString *tabTitle = il2cpp_string_new("Mod设置");
     if (!tab || !mTabCtor || !tabTitle) {
         PMLog(@"Mod页: Tab 创建失败 tab=%p ctor=%p", tab, mTabCtor);
+        pm_list_remove_last(pages);
+        pm_destroy_go((void *)page);
+        pm_destroy_go(newTabGO);
         return NO;
     }
     void *targs[1] = {tabTitle};
@@ -1731,6 +1756,9 @@ static BOOL pm_build_mod_tab(void *gsp) {
     }
     if (made == 0) {
         PMLog(@"Mod页: 设置项创建失败");
+        pm_list_remove_last(pages);
+        pm_destroy_go((void *)page);
+        pm_destroy_go(newTabGO);
         return NO;
     }
 
@@ -1741,7 +1769,14 @@ static BOOL pm_build_mod_tab(void *gsp) {
     const MethodInfo *mGspAdd = gspCls ? il2cpp_class_get_method_from_name(gspCls, "Add", 2) : NULL;
     if (mGspAdd) il2cpp_runtime_invoke(mGspAdd, gsp, aargs, &aexc);
     if (aexc) {
-        PMLog(@"Mod页: 官方 Add 抛出托管异常，本次放弃");
+        pm_log_exc("Mod页: 官方 Add", aexc);
+        // Add 内部已经先 tabs.Add 再 Layout，Layout 失败会留下半成品，
+        // 不回滚会让下一次重试的索引全部错位
+        pm_list_remove_last(tabs);
+        pm_list_remove_last(pages);
+        pm_destroy_go((void *)page);
+        pm_destroy_go(newTabGO);
+        PMLog(@"Mod页: 官方 Add 失败，已回滚本次注入");
         return NO;
     }
     pm_go_set_active((void *)page, false);   // 保持原来的分页状态，等用户点侧栏
