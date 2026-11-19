@@ -866,14 +866,16 @@ static void pm_apply_playerinfo_overrides(void *self) {
     if (rv.length) {
         // 左上角的「8.51」来自 savedRating / 100，评分图标也按同一阈值分级，
         // 所以直接改内部值再调官方刷新，数字和图标才会一起变。
+        // 左上角的评分内部单位是 1/10000（反推：999900 显示为 99.9900），
+        // 所以这里按 ×10000 写入，数字和图标才会和自定义值一致
         double r = rv.doubleValue;
         if (r < 0) r = 0;
         if (r > 9999.99) r = 9999.99;
-        int32_t rating100 = (int32_t)lround(r * 100.0);
+        int32_t rating100 = (int32_t)llround(r * 10000.0);
         if (*(int32_t *)((char *)self + kOff_PI_SavedRating) != rating100) {
             *(int32_t *)((char *)self + kOff_PI_SavedRating) = rating100;
             pm_call_obj(self, "UpdateRatingDisplayOnSceneLoad", 0, NULL);
-            PMLog(@"评分写入 savedRating=%d (=%.2f)", rating100, rating100 / 100.0);
+            PMLog(@"评分写入 savedRating=%d (=%.4f)", rating100, rating100 / 10000.0);
         }
     } else {
         pm_set_text_at(self, kOff_PI_Rating, @"rating");
@@ -895,11 +897,11 @@ static void pm_apply_commonuserinfo_overrides(void *self) {
     double r = rv.doubleValue;
     if (r < 0) r = 0;
     if (r > 9999.99) r = 9999.99;
-    int32_t r100 = (int32_t)lround(r * 100.0);
+    int32_t r100 = (int32_t)llround(r * 10000.0);
     if (*(int32_t *)((char *)self + 0xE4) != r100) {
         *(int32_t *)((char *)self + 0xE4) = r100;
         pm_call_obj(self, "UpdateRatingDisplayOnSceneLoad", 0, NULL);
-        PMLog(@"主界面左上角评分已设为 %.2f（图标同步）", r100 / 100.0);
+        PMLog(@"主界面左上角评分已设为 %.2f（图标同步）", r100 / 10000.0);
     }
 }
 
@@ -2410,6 +2412,11 @@ static void pm_apply_result_playerinfo(void) {
     if (!arr) return;
     int n = *(int *)((char *)arr + 0x18);
     void **items = *(void ***)((char *)arr + 0x20);
+    static BOOL logged = NO;
+    if (!logged && n > 0) {
+        logged = YES;
+        PMLog(@"结算卡: 找到 %d 个 ResultPlayerInfoController", n);
+    }
     if (n <= 0 || n > 32 || !items) return;
     NSString *lv = PMProfileValue(@"level");
     NSString *rt = PMProfileValue(@"rating");
@@ -2540,13 +2547,13 @@ static void pm_runtime_tick(void) {
         if (gCollectionObj) pm_apply_collection_overrides(gCollectionObj);
         if (gPI_Obj) pm_apply_playerinfo_overrides(gPI_Obj);
         if (gCUI_Obj) pm_apply_commonuserinfo_overrides(gCUI_Obj);
+        pm_apply_result_playerinfo();
     }
 
     if (now - gLastSlowTime > 1.5) {
         gLastSlowTime = now;
         pm_apply_static_settings();
         pm_apply_store_unlock();
-        pm_apply_result_playerinfo();
     }
 
     void *wrap = gWrapObj;
