@@ -1741,13 +1741,30 @@ static int pm_tab_active(void *go) {
     return boxed ? *(uint8_t *)((char *)boxed + 0x10) : -1;
 }
 
+// 侧栏按钮的“选中”动画可能在子物体上的 Animator 里，必须遍历所有 Animator
 static void pm_set_tab_active(void *go, BOOL on) {
-    void *anim = pm_tab_animator(go);
-    if (!anim) return;
+    if (!pm_ptr_ok(go)) return;
+    Il2CppClass *animCls = pm_class_any_ns("Animator", "UnityEngine");
+    if (!animCls || !il2cpp_class_get_type || !il2cpp_type_get_object) return;
+    void *t = il2cpp_type_get_object(il2cpp_class_get_type(animCls));
+    Il2CppClass *goCls = il2cpp_object_get_class((Il2CppObject *)go);
+    if (!t || !goCls) return;
+    const MethodInfo *m = il2cpp_class_get_method_from_name(goCls, "GetComponentsInChildren", 1);
+    if (!m) return;
+    void *a[1] = {t};
+    Il2CppObject *arr = il2cpp_runtime_invoke(m, go, a, NULL);
+    if (!arr) return;
+    int n = *(int *)((char *)arr + 0x18);
+    void **items = *(void ***)((char *)arr + 0x20);
+    if (n <= 0 || n > 32 || !items) return;
     Il2CppString *k = il2cpp_string_new("TabActive");
     uint8_t b = on ? 1 : 0;
-    void *a[2] = {k, &b};
-    pm_call_obj(anim, "SetBool", 2, a);
+    for (int i = 0; i < n; i++) {
+        void *an = items[i];
+        if (!pm_ptr_ok(an)) continue;
+        void *s[2] = {k, &b};
+        pm_call_obj(an, "SetBool", 2, s);
+    }
 }
 
 // 面板可能把某个侧栏按钮留在 EventSystem 的「已选中」状态，这里清一次
@@ -1782,6 +1799,8 @@ static void pm_keep_mod_tab_selected(void *gsp) {
         uint8_t f = 0;
         void *a[1] = {&f};
         pm_call_obj(items[i], "SetActive", 1, a);
+        void *go2 = *(void **)((char *)items[i] + 0x10);
+        pm_set_tab_active(go2, NO);
     }
     pm_set_tab_active(gModTabGO, YES);
     pm_clear_event_selection();
@@ -2383,6 +2402,68 @@ static int pm_store_mark(void *mgr, size_t listOff, size_t purchasedOff) {
     return changed;
 }
 
+// GameNetwork.Store 的「已购 id」是一个静态 List<string>（字段 0x10）；
+// 官方 IsPurchased(enum) = purchasedList.Contains(ToProductId(enum))，
+// 只改控制器上的 bool 会被 RefreshPurchasedState 再算回 false，必须把 id 塞进列表。
+static Il2CppClass *gProductHelperCls = NULL;
+
+static void *pm_store_purchased_list(void) {
+    static Il2CppClass *k = NULL;
+    static BOOL tried = NO;
+    if (!k && !tried) {
+        tried = YES;
+        k = pm_class_in_namespace("Store", "GameNetwork", NULL, 0);
+        if (!k) PMLog(@"商店: 找不到 GameNetwork.Store");
+    }
+    if (!k) return NULL;
+    void *sf = *(void **)((char *)k + 0xb8);          // klass->static_fields
+    if (!pm_ptr_ok(sf)) return NULL;
+    void *lst = *(void **)((char *)sf + 0x10);        // 已购 id 列表
+    return pm_ptr_ok(lst) ? lst : NULL;
+}
+
+static void *pm_store_add_product(int enumVal) {
+    if (!gProductHelperCls) gProductHelperCls = pm_class_any_ns("OnlineStoreProductDataHelper", NULL);
+    if (!gProductHelperCls) return NULL;
+    const MethodInfo *m = il2cpp_class_get_method_from_name(gProductHelperCls, "ToProductId", 1);
+    if (!m) return NULL;
+    int32_t v = enumVal;
+    void *a[1] = {&v};
+    void *pid = il2cpp_runtime_invoke(m, NULL, a, NULL);
+    void *lst = pm_store_purchased_list();
+    if (!pm_ptr_ok(pid) || !lst) return NULL;
+    void *aa[1] = {pid};
+    pm_call_obj(lst, "Add", 1, aa);
+    return pid;
+}
+
+// productOff: recommend 直接是 enum；album/single 是 Item（enum 在 +0x10）
+static int pm_store_unlock_list(void *mgr, size_t listOff, size_t purchasedOff,
+                                size_t productOff, BOOL productIsItem) {
+    void *lst = *(void **)((char *)mgr + listOff);
+    int n = 0;
+    void **items = pm_list_items(lst, &n);
+    int changed = 0;
+    for (int i = 0; i < n; i++) {
+        void *c = items[i];
+        if (!pm_ptr_ok(c)) continue;
+        int ev = -1;
+        if (productIsItem) {
+            void *prod = *(void **)((char *)c + productOff);
+            if (pm_ptr_ok(prod)) ev = *(int32_t *)((char *)prod + 0x10);
+        } else {
+            ev = *(int32_t *)((char *)c + productOff);   // enum 是值类型字段
+        }
+        if (ev >= 0) pm_store_add_product(ev);
+        if (*(uint8_t *)((char *)c + purchasedOff) == 0) {
+            *(uint8_t *)((char *)c + purchasedOff) = 1;
+            changed++;
+        }
+        pm_call_obj(c, "RefreshPurchasedState", 0, NULL);
+    }
+    return changed;
+}
+
 static void pm_apply_store_unlock(void) {
     if (!gStoreClass) gStoreClass = pm_find_class("StoreManager");
     if (!gStoreClass) return;
@@ -2390,10 +2471,10 @@ static void pm_apply_store_unlock(void) {
     void *mgr = gStoreObj;
     if (!mgr) return;
     int changed = 0;
-    changed += pm_store_mark(mgr, 0x58, 0x30);   // 推荐 tab
-    changed += pm_store_mark(mgr, 0x78, 0x48);   // 专辑 tab
-    changed += pm_store_mark(mgr, 0x98, 0x38);   // 单曲 tab
-    changed += pm_store_mark(mgr, 0xB8, 0x80);   // 皮肤 tab
+    changed += pm_store_unlock_list(mgr, 0x58, 0x30, 0x20, NO);   // 推荐（enum）
+    changed += pm_store_unlock_list(mgr, 0x78, 0x48, 0x40, YES);  // 专辑（Item）
+    changed += pm_store_unlock_list(mgr, 0x98, 0x38, 0x28, YES);  // 单曲（Item）
+    changed += pm_store_mark(mgr, 0xB8, 0x80);                    // 皮肤
     if (changed) {
         pm_call_obj(mgr, "UpdateStateDisplay", 0, NULL);
         PMLog(@"商店: 标记已购买 %d 个商品", changed);
@@ -2403,13 +2484,29 @@ static void pm_apply_store_unlock(void) {
 // 结算页的玩家信息卡（等级 / Rating）也用自定义值
 static void pm_apply_result_playerinfo(void) {
     if (!gResultInfoClass) gResultInfoClass = pm_find_class("ResultPlayerInfoController");
+    {
+        static BOOL clsLogged = NO;
+        if (!clsLogged) {
+            clsLogged = YES;
+            PMLog(@"结算卡: ResultPlayerInfoController 类=%p", gResultInfoClass);
+        }
+    }
     if (!gResultInfoClass || !gFindTypesHost || !il2cpp_class_get_type || !il2cpp_type_get_object) return;
     void *typeObj = il2cpp_type_get_object(il2cpp_class_get_type(gResultInfoClass));
-    const MethodInfo *m = il2cpp_class_get_method_from_name(gFindTypesHost, "FindObjectsOfType", 1);
-    if (!typeObj || !m) return;
-    void *args[1] = {typeObj};
-    Il2CppObject *arr = il2cpp_runtime_invoke(m, NULL, args, NULL);
-    if (!arr) return;
+    const MethodInfo *m = pm_method_nongeneric(gFindTypesHost, "FindObjectsOfType", 2);
+    Il2CppObject *arr = NULL;
+    if (m) {
+        uint8_t inc = 1;
+        void *args[2] = {typeObj, &inc};
+        arr = il2cpp_runtime_invoke(m, NULL, args, NULL);
+    } else {
+        const MethodInfo *m1 = il2cpp_class_get_method_from_name(gFindTypesHost, "FindObjectsOfType", 1);
+        if (typeObj && m1) {
+            void *args[1] = {typeObj};
+            arr = il2cpp_runtime_invoke(m1, NULL, args, NULL);
+        }
+    }
+    if (!arr || !typeObj) return;
     int n = *(int *)((char *)arr + 0x18);
     void **items = *(void ***)((char *)arr + 0x20);
     static BOOL logged = NO;
