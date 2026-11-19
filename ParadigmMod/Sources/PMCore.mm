@@ -1819,6 +1819,37 @@ static void pm_keep_mod_tab_selected(void *gsp) {
     }
 }
 
+// 侧栏高亮实际是由 UnboundedMenu.Update->UpdateActive 每帧根据 items 数组刷的，
+// 我们克隆的按钮不在数组里，所以菜单永远把上一个官方项点亮。这里把我们的按钮
+// 作为新 item 追加进菜单，让它也参与官方的选中逻辑。
+static void pm_menu_add_item(void *gsp, void *tabGO) {
+    void *um = *(void **)((char *)gsp + 0x28);
+    int n = 0;
+    void **menus = pm_list_items(um, &n);
+    if (!menus || n <= 0) return;
+    void *menu = menus[0];
+    if (!pm_ptr_ok(menu)) return;
+    void *itemsArr = *(void **)((char *)menu + 0x20);
+    if (!pm_ptr_ok(itemsArr)) return;
+    int cnt = *(int *)((char *)itemsArr + 0x18);
+    if (cnt <= 0 || cnt > 64) return;
+    void *first = *(void **)((char *)itemsArr + 0x20);
+    if (!pm_ptr_ok(first)) return;
+    Il2CppClass *itemCls = il2cpp_object_get_class((Il2CppObject *)first);
+    void *anim = pm_tab_animator(tabGO);
+    if (!itemCls || !anim) return;   // 没有 Animator 会被官方 Update 判空，宁可不加
+    Il2CppObject *arr = il2cpp_array_new(itemCls, cnt + 1);
+    void *it = il2cpp_object_new(itemCls);
+    if (!arr || !it) return;
+    void **dst = (void **)((char *)arr + 0x20);
+    void **src = (void **)((char *)itemsArr + 0x20);
+    for (int i = 0; i < cnt; i++) dst[i] = src[i];
+    *(void **)((char *)it + 0x10) = anim;   // animator
+    dst[cnt] = it;
+    *(void **)((char *)menu + 0x20) = arr;
+    PMLog(@"Mod页: 侧栏菜单项已追加 (共 %d)", cnt + 1);
+}
+
 static BOOL pm_panel_has_mod_tab(void *gsp) {
     if (!pm_ptr_ok(gsp) || !pm_ptr_ok(gModTabObj)) return NO;
     void *tabs = *(void **)((char *)gsp + 0x40);
@@ -2193,6 +2224,7 @@ static BOOL pm_build_mod_tab(void *gsp) {
     gModTabObj = tab;
     gModTabGO = newTabGO;
     gModPageGO = (void *)page;
+    pm_menu_add_item(gsp, newTabGO);
     PMLog(@"Mod设置页已注册: page=%d, 行数=%d, 页内子物体=%d, 标题类=%s, 选项类=%s",
           pageIndex, made, pm_child_count(pageTr),
           gTitleCellClass ? "TitleCell" : "无", "ChoiceCell");
@@ -2412,8 +2444,8 @@ static void *pm_store_purchased_list(void) {
     static BOOL tried = NO;
     if (!k && !tried) {
         tried = YES;
-        k = pm_class_in_namespace("Store", "GameNetwork", NULL, 0);
-        if (!k) PMLog(@"商店: 找不到 GameNetwork.Store");
+        k = pm_class_in_namespace("Store", NULL, "IsPurchased", 2);
+        if (!k) PMLog(@"商店: 找不到 Store 类");
     }
     if (!k) return NULL;
     void *sf = *(void **)((char *)k + 0xb8);          // klass->static_fields
